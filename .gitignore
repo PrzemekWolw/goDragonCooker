@@ -1,0 +1,27 @@
+# Go build output
+/goDragonCooker.x64
+/goDragonCooker.arm64
+/goDragonCooker.x64.exe
+/goDragonCooker.arm64.exe
+/.build_*
+/bin/*
+!/bin/.gitkeep
+/dist/
+
+# Texconv build output
+/third_party/Texconv-Custom-DLL/build/
+/third_party/Texconv-Custom-DLL/build_exe/
+/third_party/Texconv-Custom-DLL/bin/
+/third_party/Texconv-Custom-DLL/texconv.dll
+/third_party/Texconv-Custom-DLL/libtexconv.so
+/third_party/Texconv-Custom-DLL/texconv.exe
+
+# Python
+__pycache__/
+*.py[cod]
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
