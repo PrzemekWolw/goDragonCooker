@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	g "github.com/AllenDang/giu"
@@ -115,11 +116,54 @@ func gpuControlsUI() {
 	app.mu.RLock()
 	report := append([]string(nil), app.gpuReport...)
 	configuredGPU := app.gpuAdapter
+	configuredVulkanDevice := app.vulkanDevice
+	backend := app.textureBackend
+	vulkanDevices := append([]string(nil), app.vulkanDevices...)
 	checking := app.gpuChecking
 	app.mu.RUnlock()
 	g.Separator()
 
-	if isWindows() {
+	backendOptions := []string{"Compressonator (Vulkan GPU)", "Texconv"}
+	backendIndex := int32(0)
+	if backend == textureBackendTexconv {
+		backendIndex = 1
+	}
+	g.Label("Texture backend:").Build()
+	g.SameLine()
+	g.Combo("##texture_backend", backendOptions[backendIndex], backendOptions, &backendIndex).
+		Size(320).
+		OnChange(func() {
+			app.mu.Lock()
+			if backendIndex == 1 {
+				app.textureBackend = textureBackendTexconv
+			} else {
+				app.textureBackend = textureBackendCompressonator
+			}
+			app.mu.Unlock()
+			saveSettings()
+		}).Build()
+
+	if backend == textureBackendCompressonator {
+		vulkanOptions := []string{"Automatic (best)"}
+		for index, name := range vulkanDevices {
+			vulkanOptions = append(vulkanOptions, fmt.Sprintf("%d: %s", index, name))
+		}
+		vulkanIndex := configuredVulkanDevice + 1
+		if vulkanIndex < 0 || vulkanIndex >= int32(len(vulkanOptions)) {
+			vulkanIndex = 0
+		}
+		g.Label("Compressonator GPU:").Build()
+		g.SameLine()
+		g.Combo("##compressonator_gpu", vulkanOptions[vulkanIndex], vulkanOptions, &vulkanIndex).
+			Size(320).
+			OnChange(func() {
+				app.mu.Lock()
+				app.vulkanDevice = vulkanIndex - 1
+				app.mu.Unlock()
+				saveSettings()
+				rerunGPUCheck()
+			}).Build()
+	} else if isWindows() {
 		options := gpuAdapterOptions()
 		comboIndex := int32(gpuAdapterOptionIndex(int(configuredGPU)))
 		if comboIndex < 0 || comboIndex >= int32(len(options)) {
@@ -133,6 +177,7 @@ func gpuControlsUI() {
 				app.mu.Lock()
 				app.gpuAdapter = int32(gpuAdapterIndexForOption(int(comboIndex)))
 				app.mu.Unlock()
+				saveSettings()
 				rerunGPUCheck()
 			}).Build()
 		if checking {

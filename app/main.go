@@ -21,22 +21,27 @@ var appVersion = "dev"
 // ---------------------------------------------------------------------------
 
 type appState struct {
-	mu          sync.RWMutex
-	tabCook     *cookTab
-	tabMatGen   *matGenTab
-	dirPicker   *dirPickerState
-	texconvWarn string
-	warnShown   bool
-	gpuReport   []string
-	gpuAdapter  int32
-	gpuChecking bool
+	mu             sync.RWMutex
+	tabCook        *cookTab
+	tabMatGen      *matGenTab
+	dirPicker      *dirPickerState
+	texconvWarn    string
+	warnShown      bool
+	gpuReport      []string
+	gpuAdapter     int32
+	vulkanDevice   int32
+	textureBackend string
+	vulkanDevices  []string
+	gpuChecking    bool
 }
 
 var app = &appState{
-	tabCook:    &cookTab{stopCook: make(chan struct{}), autoDetectFmt: true},
-	tabMatGen:  &matGenTab{stopGenerate: make(chan struct{}), settings: defaultMatGenSettings(), patternBufs: make(map[string]*patternEditBuf)},
-	dirPicker:  newDirPicker(),
-	gpuAdapter: -1,
+	tabCook:        &cookTab{stopCook: make(chan struct{}), autoDetectFmt: true},
+	tabMatGen:      &matGenTab{stopGenerate: make(chan struct{}), settings: defaultMatGenSettings(), patternBufs: make(map[string]*patternEditBuf)},
+	dirPicker:      newDirPicker(),
+	gpuAdapter:     -1,
+	vulkanDevice:   -1,
+	textureBackend: textureBackendCompressonator,
 }
 
 // ---------------------------------------------------------------------------
@@ -45,6 +50,7 @@ var app = &appState{
 
 func main() {
 	runtime.LockOSThread()
+	loadSettings()
 
 	title := fmt.Sprintf("Materials Tools (GoDragonPBR) v%s", appVersion)
 	wnd := g.NewMasterWindow(title, 1280, 900, 0)

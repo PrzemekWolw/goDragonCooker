@@ -56,6 +56,26 @@ func runGPUCheck() []string {
 	report := platformGPUInfo()
 	report = append(report, "Texconv version: "+texconvVersion())
 	report = append(report, checkTexconvGPU()...)
+	devices, deviceErr := vulkanDevices()
+	app.mu.Lock()
+	app.vulkanDevices = devices
+	selectedDevice := app.vulkanDevice
+	app.mu.Unlock()
+	report = append(report, "Compressonator version: "+vulkanVersion())
+	if deviceErr != nil {
+		report = append(report, "Compressonator Vulkan: FAILED ("+deviceErr.Error()+")")
+	} else if err := ensureVulkanContext(selectedDevice); err != nil {
+		report = append(report, "Compressonator Vulkan: FAILED ("+err.Error()+")")
+	} else {
+		deviceName := vulkanContextDeviceName()
+		if deviceName == "" && selectedDevice >= 0 && int(selectedDevice) < len(devices) {
+			deviceName = devices[selectedDevice]
+		}
+		if deviceName == "" {
+			deviceName = "unknown"
+		}
+		report = append(report, "Compressonator Vulkan: OK ("+deviceName+")")
+	}
 	return report
 }
 

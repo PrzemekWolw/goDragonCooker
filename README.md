@@ -9,32 +9,57 @@ goDragonCooker is a desktop utility for preparing BeamNG texture and material fi
 
 It provides:
 
-- Texture cooking to DDS using Texconv.
+- Texture cooking to DDS using either Compressonator Vulkan or Texconv.
 - Automatic handling of color, data, and normal texture suffixes.
-- GPU BC6H/BC7 compression with CPU fallback.
+- Parallel Vulkan GPU BC4, BC5, BC6H, and BC7 compression.
+- Vulkan sRGB, separate-alpha, power-of-two resizing, and mip generation.
 - Material JSON generation from groups of texture files.
 - Optional detail-map and material-instance settings.
 
+## Texture backends
+
+`Compressonator (Vulkan GPU)` is the default. It loads the source, performs
+power-of-two resizing and mip generation, compresses every texture on the
+selected Vulkan device, and writes the complete DDS file.
+Batch cooking overlaps image decoding and DDS writing with up to four Vulkan
+compression jobs.
+
+`Texconv` is the compatibility backend for systems without Vulkan support and
+the only backend available on macOS. It uses DirectXTex for resizing, mip
+generation, and DDS compression.
+
+The Compressonator backend supports BC4_UNORM, BC5_UNORM, BC6H_UF16,
+BC7_UNORM, and BC7_UNORM_SRGB targets. Its native loader accepts PNG, JPEG,
+BMP, TGA, HDR, TIFF, and EXR sources.
+
 ## Platform support
 
-- Windows x64 and arm64: supported when built with matching C/C++ and Texconv toolchains.
-- Linux x64 and arm64: supported when built with matching C/C++ and Texconv toolchains.
-- macOS x64 and arm64: supported when built on macOS with the Apple SDK.
+- Windows x64 and ARM64: Compressonator Vulkan and Texconv.
+- Linux x64 and ARM64: Compressonator Vulkan and Texconv.
+- macOS x64 and ARM64: Texconv only, built on macOS with the Apple SDK.
 
 See [BUILD.md](BUILD.md) for build instructions.
 
 ## Running
 
-The platform-specific Texconv library must be in the target-specific `bin` subdirectory next to the application:
+The application loads native libraries from `bin/<platform>-<architecture>`
+next to the executable:
 
-- Windows x64: `bin/windows-x64/texconv.dll`
-- Windows ARM64: `bin/windows-arm64/texconv.dll`
-- Linux x64: `bin/linux-x64/libtexconv.so`
-- Linux ARM64: `bin/linux-arm64/libtexconv.so`
-- macOS x64: `bin/macos-x64/libtexconv.dylib`
-- macOS ARM64: `bin/macos-arm64/libtexconv.dylib`
+- Windows: `texconv.dll`, `gdc_vulkan.dll`, runtime dependencies, and `shaders/*.spv`
+- Linux: `libtexconv.so`, `libgdc_vulkan.so`, runtime dependencies, and `shaders/*.spv`
+- macOS: `libtexconv.dylib`
 
-For development, run `go run ./app` from the repository root. The application selects the matching target directory automatically.
+The Compressonator backend requires a Vulkan 1.1 loader and a compute-capable
+Vulkan driver. Use the GPU selector in the Texture Cooker to choose a physical
+device or let the application select the best available device. Current GPU
+drivers normally install the platform Vulkan loader (`vulkan-1.dll` on Windows
+or `libvulkan.so.1` on Linux); all other native dependencies are included in
+the release archive.
+
+For development on Linux, `build_release.py` downloads and caches the LunarG
+Vulkan SDK automatically when the native Vulkan library needs rebuilding and
+`VULKAN_SDK` is unset. On Windows, set `VULKAN_SDK` to an SDK containing DXC
+before building. Then run `go run ./app` from the repository root.
 
 ## License
 

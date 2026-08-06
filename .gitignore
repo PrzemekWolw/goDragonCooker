@@ -4,6 +4,7 @@
 /goDragonCooker.x64.exe
 /goDragonCooker.arm64.exe
 /.build_*
+/.build/
 /bin/*
 !/bin/.gitkeep
 /dist/

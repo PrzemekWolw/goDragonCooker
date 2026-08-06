@@ -13,12 +13,16 @@ Usage:
     python build_release.py --clean      # remove artifacts before building
     python build_release.py --no-upx     # skip UPX compression
     python build_release.py --skip-texconv  # use existing Texconv libraries
+    python build_release.py --skip-vulkan   # use existing Vulkan libraries/shaders
 
 Requires (Linux):
     - go 1.26.5+ with CGO support
     - mingw64-cross-gcc + mingw64-cross-gcc-c++ for Windows x64 cross-compile
     - aarch64-w64-mingw32-gcc + aarch64-w64-mingw32-g++ for Windows ARM64 cross-compile
     - aarch64-linux-gnu-gcc + aarch64-linux-gnu-g++ for Linux ARM64 cross-compile
+    - CMake 3.21+; Linux downloads the Vulkan SDK/DXC automatically
+      when VULKAN_SDK is not set or incomplete
+    - curl is an optional fallback for LunarG SDK downloads
     - upx (optional, skipped gracefully if not found)
 
 Requires (Windows):
@@ -27,6 +31,7 @@ Requires (Windows):
     - x86_64-linux-gnu-gcc/g++ for Linux x64 builds
     - aarch64-linux-gnu-gcc/g++ for Linux ARM64 builds
     - Visual Studio C++ tools and Windows SDK for Texconv builds
+    - CMake 3.21+ and Vulkan SDK/DXC for Vulkan native builds
     - upx (optional, skipped gracefully if not found)
 """
 
@@ -38,7 +43,9 @@ import platform
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -51,9 +58,12 @@ APP_SOURCE = PROJECT / "app"
 BIN_DIR = PROJECT / "bin"
 DIST_DIR = PROJECT / "dist"
 TEXCONV_SOURCE = PROJECT / "third_party" / "Texconv-Custom-DLL"
+VULKAN_SOURCE = APP_SOURCE / "native" / "vulkan"
 VERSION_FILE = PROJECT / "VERSION"
 APP_VERSION = VERSION_FILE.read_text(encoding="utf-8").strip()
 CPU_THREADS = max(1, os.cpu_count() or 1)
+VULKAN_BUILD_OUTPUTS: dict[str, Path] = {}
+BINARY_BUILD_OUTPUTS: dict[str, Path] = {}
 
 def make_target(platform_name: str, goos: str, goarch: str, arch_name: str) -> dict:
     name = f"{platform_name}-{arch_name}"
@@ -63,6 +73,7 @@ def make_target(platform_name: str, goos: str, goarch: str, arch_name: str) -> d
         "darwin": "libtexconv.dylib",
         "windows": "texconv.dll",
     }[goos]
+    vulkan_lib = "gdc_vulkan.dll" if goos == "windows" else "libgdc_vulkan.so"
     return {
         "name": name,
         "platform": platform_name,
@@ -73,6 +84,7 @@ def make_target(platform_name: str, goos: str, goarch: str, arch_name: str) -> d
         "cflags": {},
         "ldflags_extra": "-H windowsgui" if goos == "windows" else "",
         "texconv_lib": texconv_lib,
+        "vulkan_lib": vulkan_lib,
         "zip_name": f"goDragonCooker-{platform_name}-{arch_name}.zip",
     }
 
@@ -85,6 +97,55 @@ TARGETS = [
     make_target("windows", "windows", "amd64", "x64"),
     make_target("windows", "windows", "arm64", "arm64"),
 ]
+
+
+def vulkan_runtime_libraries(directory: Path, platform_name: str) -> list[Path]:
+    pattern = "*.dll" if platform_name == "windows" else "*.so*"
+    libraries = list(directory.rglob(pattern))
+    if platform_name == "linux":
+        libraries = [
+            library for library in libraries
+            if (suffix := library.name.partition(".so")[2]) == ""
+            or (suffix.startswith(".") and suffix[1:].isdigit())
+        ]
+    return libraries
+
+
+def verify_vulkan_runtime(library: Path, directory: Path, platform_name: str):
+    if platform_name == "windows":
+        try:
+            with os.add_dll_directory(str(directory)):
+                ctypes.WinDLL(str(library))
+        except OSError as error:
+            log(f"Packaged Vulkan library cannot be loaded: {error}", error=True)
+            sys.exit(1)
+        return
+
+    readelf = shutil.which("readelf")
+    if not readelf:
+        log("readelf is required to verify the Linux Vulkan package", error=True)
+        sys.exit(1)
+    dynamic = run([readelf, "-d", str(library)])
+    if "(RPATH)" not in dynamic.stdout or "$ORIGIN" not in dynamic.stdout:
+        log(
+            f"{library.name} must use transitive RPATH=$ORIGIN for bundled dependencies",
+            error=True,
+        )
+        sys.exit(1)
+
+    dependencies = run(["ldd", str(library)])
+    if "not found" in dependencies.stdout:
+        log(f"Unresolved Vulkan runtime dependency:\n{dependencies.stdout}", error=True)
+        sys.exit(1)
+    bundled = {path.name for path in vulkan_runtime_libraries(directory, "linux")}
+    for line in dependencies.stdout.splitlines():
+        if "=>" not in line:
+            continue
+        name, resolved = (part.strip() for part in line.split("=>", 1))
+        resolved_path = resolved.split(" ", 1)[0]
+        if name in bundled and Path(resolved_path).resolve().parent != directory.resolve():
+            log(f"{name} resolved outside the package: {resolved_path}", error=True)
+            sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +225,8 @@ def get_sources() -> list[Path]:
     out.extend(APP_SOURCE.glob("*.c"))
     out.extend(APP_SOURCE.glob("*.cpp"))
     out.extend(APP_SOURCE.glob("*.h"))
+    if VULKAN_SOURCE.exists():
+        out.extend(path for path in VULKAN_SOURCE.rglob("*") if path.is_file())
     out.append(VERSION_FILE)
     if (PROJECT / "go.mod").exists():
         out.append(PROJECT / "go.mod")
@@ -265,6 +328,104 @@ def linux_compiler_env(target: dict) -> dict[str, str]:
     sys.exit(1)
 
 
+def ensure_linux_vulkan_sdk() -> None:
+    if platform.system() != "Linux":
+        return
+    configured_sdk = os.environ.get("VULKAN_SDK")
+    if configured_sdk:
+        dxc_paths = [
+            Path(configured_sdk) / "bin" / "dxc",
+            Path(configured_sdk) / "Bin" / "dxc",
+        ]
+        if any(path.is_file() for path in dxc_paths) or shutil.which("dxc"):
+            return
+        log(
+            f"VULKAN_SDK is set to {configured_sdk}, but dxc was not found; "
+            "installing a complete SDK"
+        )
+
+    sdk_cache = PROJECT / ".build" / "vulkan-sdk"
+    sdk_cache.mkdir(parents=True, exist_ok=True)
+    version_url = "https://vulkan.lunarg.com/sdk/latest/linux.txt"
+    try:
+        request = urllib.request.Request(
+            version_url,
+            headers={"User-Agent": "goDragonCooker build"},
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            version = response.read().decode("utf-8").strip()
+    except Exception as exception:
+        log(f"Could not query the latest Vulkan SDK: {exception}", error=True)
+        sys.exit(1)
+    if not version or any(character not in "0123456789." for character in version):
+        log(f"Invalid Vulkan SDK version returned by LunarG: {version!r}", error=True)
+        sys.exit(1)
+
+    sdk_root = sdk_cache / version
+    sdk_path = sdk_root / "x86_64"
+    if not sdk_path.is_dir() or not (sdk_path / "bin" / "dxc").is_file():
+        archive = sdk_cache / f"vulkan_sdk-{version}.tar.xz"
+        download_url = (
+            f"https://sdk.lunarg.com/sdk/download/{version}/linux/vulkan_sdk.tar.xz"
+        )
+        log(f"Downloading Vulkan SDK {version}...")
+        try:
+            request = urllib.request.Request(
+                download_url,
+                headers={"User-Agent": "goDragonCooker build"},
+            )
+            with urllib.request.urlopen(request, timeout=300) as response:
+                with archive.open("wb") as output:
+                    shutil.copyfileobj(response, output)
+        except Exception as exception:
+            if not shutil.which("curl"):
+                archive.unlink(missing_ok=True)
+                log(f"Could not download Vulkan SDK: {exception}", error=True)
+                sys.exit(1)
+            log("Retrying Vulkan SDK download with curl...")
+            result = subprocess.run(
+                [
+                    "curl",
+                    "--fail",
+                    "--location",
+                    "--retry",
+                    "3",
+                    "--user-agent",
+                    "goDragonCooker build",
+                    "--output",
+                    str(archive),
+                    download_url,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or str(exception)
+                archive.unlink(missing_ok=True)
+                log(f"Could not download Vulkan SDK: {detail}", error=True)
+                sys.exit(1)
+        try:
+            with tarfile.open(archive, "r:xz") as package:
+                package.extractall(sdk_cache)
+        except Exception as exception:
+            log(f"Could not install Vulkan SDK: {exception}", error=True)
+            sys.exit(1)
+        finally:
+            archive.unlink(missing_ok=True)
+        if not sdk_path.is_dir():
+            log(f"Vulkan SDK extracted without x86_64 files: {sdk_root}", error=True)
+            sys.exit(1)
+
+    os.environ["VULKAN_SDK"] = str(sdk_path)
+    os.environ["PATH"] = os.pathsep.join(
+        [str(sdk_path / "bin"), os.environ.get("PATH", "")]
+    )
+    os.environ["CMAKE_PREFIX_PATH"] = os.pathsep.join(
+        [str(sdk_path), str(sdk_path / "lib" / "VulkanLoader")]
+    )
+    log(f"Using Vulkan SDK {version} from {sdk_path}")
+
+
 def darwin_compiler_env(target: dict) -> dict[str, str]:
     """Return a usable C/C++ compiler environment for a macOS build."""
     if platform.system() != "Darwin":
@@ -287,6 +448,10 @@ def darwin_compiler_env(target: dict) -> dict[str, str]:
 
 def texconv_library(target: dict) -> Path:
     return BIN_DIR / target["name"] / target["texconv_lib"]
+
+
+def vulkan_library(target: dict) -> Path:
+    return BIN_DIR / target["name"] / target["vulkan_lib"]
 
 
 def texconv_host_target() -> str:
@@ -412,6 +577,124 @@ def build_texconv_target(target: dict, universal: bool):
     log(f"Installed {destination}")
 
 
+def build_vulkan(targets: list[dict], skip: bool):
+    if skip:
+        return
+    if not VULKAN_SOURCE.exists():
+        log("Compressonator Vulkan source not found", error=True)
+        sys.exit(1)
+
+    host_target = texconv_host_target()
+    native_sources = [path for path in VULKAN_SOURCE.rglob("*") if path.is_file()]
+    required_shaders = {"bc4.spv", "bc5.spv", "bc6.spv", "bc7.spv", "mipmap.spv"}
+    pending_targets = []
+    for target in targets:
+        if target["platform"] not in {"windows", "linux"} or target["platform"] != host_target:
+            continue
+        destination = vulkan_library(target)
+        shader_destination = destination.parent / "shaders"
+        shader_names = {
+            shader.name for shader in shader_destination.glob("*.spv")
+        } if shader_destination.is_dir() else set()
+        if (
+            destination.exists()
+            and shader_names == required_shaders
+            and not needs_build(destination, native_sources)
+        ):
+            log(f"Skipping Compressonator Vulkan {target['name']} (up to date)")
+            continue
+        pending_targets.append(target)
+
+    if not pending_targets:
+        return
+    if not shutil.which("cmake"):
+        log("CMake is required for the Compressonator Vulkan backend", error=True)
+        sys.exit(1)
+    if not os.environ.get("VULKAN_SDK"):
+        if platform.system() == "Linux":
+            ensure_linux_vulkan_sdk()
+        else:
+            log(
+                "VULKAN_SDK is not set; using existing Compressonator Vulkan "
+                "libraries in bin/"
+            )
+            return
+
+    for target in pending_targets:
+        destination = vulkan_library(target)
+        shader_destination = destination.parent / "shaders"
+        build_dir = PROJECT / ".build" / f"vulkan-{target['name']}"
+        install_dir = PROJECT / ".build" / f"vulkan-install-{target['name']}"
+        build_dir.mkdir(parents=True, exist_ok=True)
+        if install_dir.exists():
+            shutil.rmtree(install_dir)
+        install_dir.mkdir(parents=True, exist_ok=True)
+        env = (
+            windows_compiler_env(target)
+            if target["platform"] == "windows"
+            else linux_compiler_env(target)
+        )
+        configure = [
+            "cmake",
+            "-S", str(VULKAN_SOURCE),
+            "-B", str(build_dir),
+            "-DCMAKE_BUILD_TYPE=Release",
+            f"-DCMAKE_INSTALL_PREFIX={install_dir}",
+        ]
+        if os.environ.get("VULKAN_SDK"):
+            configure.append(f"-DCMAKE_PREFIX_PATH={os.environ['VULKAN_SDK']}")
+        if env.get("CXX"):
+            configure.append(f"-DCMAKE_CXX_COMPILER={env['CXX']}")
+            if "g++" in Path(env["CXX"]).name:
+                configure[1:1] = ["-G", "MinGW Makefiles"]
+        run(configure, env=env)
+        run(["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", str(CPU_THREADS)], env=env)
+        run([
+            "cmake", "--install", str(build_dir), "--config", "Release",
+            "--component", "gdc_vulkan_runtime",
+        ], env=env)
+
+        built = list(install_dir.rglob(target["vulkan_lib"]))
+        if not built:
+            log(f"Compressonator Vulkan build did not produce {target['vulkan_lib']}", error=True)
+            sys.exit(1)
+        VULKAN_BUILD_OUTPUTS[target["name"]] = built[0]
+        verify_vulkan_runtime(built[0], install_dir, target["platform"])
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(str(built[0]), str(destination))
+        except PermissionError:
+            log(f"Could not refresh locked runtime library {destination}; packaging fresh build output")
+        runtime_pattern = "*.dll" if target["platform"] == "windows" else "*.so*"
+        backend_libraries = {
+            target["vulkan_lib"].lower(),
+            target["texconv_lib"].lower(),
+        }
+        for old_runtime in destination.parent.glob(runtime_pattern):
+            if old_runtime.name.lower() not in backend_libraries:
+                try:
+                    old_runtime.unlink()
+                except PermissionError:
+                    log(f"Could not remove locked runtime library {old_runtime.name}")
+        for runtime_library in vulkan_runtime_libraries(install_dir, target["platform"]):
+            if runtime_library.name.lower() not in backend_libraries:
+                try:
+                    shutil.copy2(
+                        str(runtime_library),
+                        str(destination.parent / runtime_library.name),
+                    )
+                except PermissionError:
+                    log(f"Could not refresh locked runtime library {runtime_library.name}")
+        built_shaders = list(install_dir.rglob("*.spv"))
+        if {shader.name for shader in built_shaders} != required_shaders:
+            log("Compressonator Vulkan build did not produce all required shaders", error=True)
+            sys.exit(1)
+        shader_destination.mkdir(parents=True, exist_ok=True)
+        for shader in built_shaders:
+            shutil.copy2(str(shader), str(shader_destination / shader.name))
+        log(f"Installed Compressonator Vulkan backend in {destination.parent}")
+
+
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
@@ -434,10 +717,15 @@ def clean():
         log("  removed dist/")
 
 
-def build_target(target: dict, upx: bool, go_parallelism: int):
+def build_target(
+    target: dict,
+    upx: bool,
+    upx_threads: bool,
+    go_parallelism: int,
+    sources: list[Path],
+):
     name = target["name"]
     binary = binary_path(target)
-    sources = get_sources()
 
     if not needs_build(binary, sources):
         log(f"Skipping {name} (up to date)")
@@ -488,9 +776,9 @@ def build_target(target: dict, upx: bool, go_parallelism: int):
     log(f"  Stripped build: {before_mb:.1f} MB")
 
     # UPX compress if available and requested
-    if upx and upx_available():
+    if upx:
         upx_cmd = ["upx", "--best"]
-        if upx_supports_threads():
+        if upx_threads:
             upx_cmd.append(f"--threads={CPU_THREADS}")
         upx_cmd.append(str(tmp_binary))
         result = run(upx_cmd, check=False)
@@ -502,16 +790,18 @@ def build_target(target: dict, upx: bool, go_parallelism: int):
             log("  UPX compression failed, keeping stripped binary", error=True)
     else:
         after_mb = before_mb
-        if upx and not upx_available():
-            log("  UPX not found, skipping compression")
 
     # Replace final binary
-    if binary.exists():
-        binary.unlink()
-    shutil.move(str(tmp_binary), str(binary))
-    binary.chmod(0o755)
-
-    log(f"Built {binary.name} ({after_mb:.1f} MB)")
+    try:
+        if binary.exists():
+            binary.unlink()
+        shutil.move(str(tmp_binary), str(binary))
+        binary.chmod(0o755)
+        BINARY_BUILD_OUTPUTS[name] = binary
+        log(f"Built {binary.name} ({after_mb:.1f} MB)")
+    except PermissionError:
+        BINARY_BUILD_OUTPUTS[name] = tmp_binary
+        log(f"Could not replace locked {binary.name}; packaging fresh build output")
 
 
 # ---------------------------------------------------------------------------
@@ -520,15 +810,22 @@ def build_target(target: dict, upx: bool, go_parallelism: int):
 
 def package_target(target: dict):
     name = target["name"]
-    binary_src = binary_path(target)
+    binary_src = BINARY_BUILD_OUTPUTS.get(name, binary_path(target))
     lib_name = target["texconv_lib"]
     lib_src = texconv_library(target)
+    vulkan_src = VULKAN_BUILD_OUTPUTS.get(target["name"], vulkan_library(target))
+    shader_src = vulkan_src.parent / "shaders"
 
     if not binary_src.exists():
         log(f"Binary not found: {binary_src}", error=True)
         return
     if not lib_src.exists():
         log(f"Library not found: {lib_src}", error=True)
+        return
+    if target["platform"] in {"windows", "linux"} and (
+        not vulkan_src.exists() or not shader_src.is_dir()
+    ):
+        log(f"Compressonator Vulkan backend not found: {vulkan_src}", error=True)
         return
 
     DIST_DIR.mkdir(exist_ok=True)
@@ -539,8 +836,22 @@ def package_target(target: dict):
     stage_bin = stage / "bin" / target["name"]
     stage_bin.mkdir(parents=True)
 
-    shutil.copy2(str(binary_src), str(stage / binary_src.name))
+    packaged_binary_name = binary_path(target).name
+    shutil.copy2(str(binary_src), str(stage / packaged_binary_name))
     shutil.copy2(str(lib_src), str(stage_bin / lib_name))
+    if target["platform"] in {"windows", "linux"}:
+        shutil.copy2(str(vulkan_src), str(stage_bin / target["vulkan_lib"]))
+        shutil.copytree(str(shader_src), str(stage_bin / "shaders"))
+        backend_libraries = {target["vulkan_lib"], target["texconv_lib"]}
+        for runtime_library in vulkan_runtime_libraries(
+            vulkan_src.parent,
+            target["platform"],
+        ):
+            if runtime_library.name not in backend_libraries:
+                shutil.copy2(
+                    str(runtime_library),
+                    str(stage_bin / runtime_library.name),
+                )
 
     zip_path = DIST_DIR / target["zip_name"]
     with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
@@ -570,6 +881,7 @@ def main():
     p.add_argument("--clean", action="store_true", help="Remove artifacts before building")
     p.add_argument("--no-upx", action="store_true", help="Skip UPX compression")
     p.add_argument("--skip-texconv", action="store_true", help="Use existing Texconv libraries")
+    p.add_argument("--skip-vulkan", action="store_true", help="Use existing Compressonator Vulkan libraries")
     args = p.parse_args()
 
     if args.clean:
@@ -601,11 +913,24 @@ def main():
 
     upx_enabled = not args.no_upx
     build_texconv(selected, args.skip_texconv)
+    build_vulkan(selected, args.skip_vulkan)
 
+    sources = get_sources()
+    upx_installed = upx_enabled and upx_available()
+    upx_threads = upx_installed and upx_supports_threads()
+    if upx_enabled and not upx_installed:
+        log("UPX not found, skipping compression")
     go_parallelism = max(1, CPU_THREADS // len(selected))
     with ThreadPoolExecutor(max_workers=len(selected)) as executor:
         futures = [
-            executor.submit(build_target, target, upx_enabled, go_parallelism)
+            executor.submit(
+                build_target,
+                target,
+                upx_installed,
+                upx_threads,
+                go_parallelism,
+                sources,
+            )
             for target in selected
         ]
         for future in futures:

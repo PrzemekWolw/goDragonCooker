@@ -83,6 +83,10 @@ func runCooker(directory string, tab *cookTab) {
 	stopCook := tab.stopCook
 	autoDetectFmt := tab.autoDetectFmt
 	tab.mu.Unlock()
+	app.mu.RLock()
+	backend := app.textureBackend
+	vulkanDevice := app.vulkanDevice
+	app.mu.RUnlock()
 	g.Update()
 
 	tab.log("Starting processing")
@@ -203,54 +207,21 @@ func runCooker(directory string, tab *cookTab) {
 		}
 	}
 
-	tab.log(fmt.Sprintf("Cooking %d files: %d BC6H/BC7 first, then %d CPU-batch", total, len(codecJobs), len(cpuJobs)))
-
-	useCPUCodec := false
-	for _, j := range codecJobs {
-		select {
-		case <-stopCook:
-			tab.log("Cooking cancelled.")
-			finishCook(tab, "Cancelled")
-			return
-		default:
+	if backend == textureBackendCompressonator {
+		numWorkers := vulkanPipelineWorkerCount
+		if numWorkers > len(jobs) {
+			numWorkers = len(jobs)
 		}
-
-		args := cookArgs(j)
-		var errMsg string
-		if useCPUCodec {
-			errMsg = texconvRunCPU(args)
-		} else {
-			errMsg = texconvRun(args)
-			if errMsg != "" {
-				useCPUCodec = true
-				if fallbackErr := texconvRunCPU(args); fallbackErr == "" {
-					errMsg = ""
-					tab.log(fmt.Sprintf("  GPU codec failed for %s; using CPU codec for remaining BC6H/BC7 textures.", filepath.Base(j.srcFile)))
-				} else {
-					errMsg += "; CPU fallback: " + fallbackErr
-				}
-			}
-		}
-		recordResult(cookResult{name: filepath.Base(j.srcFile), err: errMsg})
-	}
-
-	if len(cpuJobs) > 0 {
-		numWorkers := runtime.NumCPU()
-		if numWorkers > len(cpuJobs) {
-			numWorkers = len(cpuJobs)
-		}
-		if numWorkers < 1 {
-			numWorkers = 1
-		}
-		tab.log(fmt.Sprintf("Running %d CPU-batch textures with %d workers.", len(cpuJobs), numWorkers))
-
-		jobCh := make(chan cookJob, len(cpuJobs))
-		for _, j := range cpuJobs {
-			jobCh <- j
+		tab.log(fmt.Sprintf(
+			"Cooking %d files with Compressonator Vulkan (%d GPU workers, %d pipeline workers).",
+			total, vulkanWorkerCount, numWorkers))
+		jobCh := make(chan cookJob, len(jobs))
+		for _, job := range jobs {
+			jobCh <- job
 		}
 		close(jobCh)
 
-		results := make(chan cookResult, len(cpuJobs))
+		results := make(chan cookResult, len(jobs))
 		var wg sync.WaitGroup
 		wg.Add(numWorkers)
 		for i := 0; i < numWorkers; i++ {
@@ -260,23 +231,101 @@ func runCooker(directory string, tab *cookTab) {
 					select {
 					case <-stopCook:
 						return
-					case j, ok := <-jobCh:
+					case job, ok := <-jobCh:
 						if !ok {
 							return
 						}
-						results <- cookResult{name: filepath.Base(j.srcFile), err: texconvRun(cookArgs(j))}
+						results <- cookResult{
+							name: filepath.Base(job.srcFile),
+							err:  vulkanCompress(job, vulkanDevice),
+						}
 					}
 				}
 			}()
 		}
-
 		go func() {
 			wg.Wait()
 			close(results)
 		}()
+		for result := range results {
+			recordResult(result)
+		}
+	} else {
+		tab.log(fmt.Sprintf("Cooking %d files: %d BC6H/BC7 first, then %d CPU-batch", total, len(codecJobs), len(cpuJobs)))
 
-		for r := range results {
-			recordResult(r)
+		useCPUCodec := false
+		for _, j := range codecJobs {
+			select {
+			case <-stopCook:
+				tab.log("Cooking cancelled.")
+				finishCook(tab, "Cancelled")
+				return
+			default:
+			}
+
+			args := cookArgs(j)
+			var errMsg string
+			if useCPUCodec {
+				errMsg = texconvRunCPU(args)
+			} else {
+				errMsg = texconvRun(args)
+				if errMsg != "" {
+					useCPUCodec = true
+					if fallbackErr := texconvRunCPU(args); fallbackErr == "" {
+						errMsg = ""
+						tab.log(fmt.Sprintf("  GPU codec failed for %s; using CPU codec for remaining BC6H/BC7 textures.", filepath.Base(j.srcFile)))
+					} else {
+						errMsg += "; CPU fallback: " + fallbackErr
+					}
+				}
+			}
+			recordResult(cookResult{name: filepath.Base(j.srcFile), err: errMsg})
+		}
+
+		if len(cpuJobs) > 0 {
+			numWorkers := runtime.NumCPU()
+			if numWorkers > len(cpuJobs) {
+				numWorkers = len(cpuJobs)
+			}
+			if numWorkers < 1 {
+				numWorkers = 1
+			}
+			tab.log(fmt.Sprintf("Running %d CPU-batch textures with %d workers.", len(cpuJobs), numWorkers))
+
+			jobCh := make(chan cookJob, len(cpuJobs))
+			for _, j := range cpuJobs {
+				jobCh <- j
+			}
+			close(jobCh)
+
+			results := make(chan cookResult, len(cpuJobs))
+			var wg sync.WaitGroup
+			wg.Add(numWorkers)
+			for i := 0; i < numWorkers; i++ {
+				go func() {
+					defer wg.Done()
+					for {
+						select {
+						case <-stopCook:
+							return
+						case j, ok := <-jobCh:
+							if !ok {
+								return
+							}
+							results <- cookResult{name: filepath.Base(j.srcFile), err: texconvRun(cookArgs(j))}
+						}
+					}
+				}()
+			}
+
+			go func() {
+				wg.Wait()
+				close(results)
+			}()
+
+			for r := range results {
+				recordResult(r)
+			}
 		}
 	}
 
