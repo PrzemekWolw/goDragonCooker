@@ -1,3 +1,6 @@
 [submodule "third_party/Texconv-Custom-DLL"]
 	path = third_party/Texconv-Custom-DLL
 	url = https://github.com/PrzemekWolw/Texconv-Custom-DLL.git
+[submodule "third_party/compressonator"]
+	path = third_party/compressonator
+	url = https://github.com/PrzemekWolw/compressonator.git
