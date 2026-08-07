@@ -1,0 +1,186 @@
+name: Build
+
+on:
+    push:
+        branches:
+            - master
+        tags:
+            - "v*"
+    pull_request:
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    shaders:
+        name: Vulkan shaders
+        runs-on: ubuntu-24.04
+        steps:
+            - name: Check out source
+              uses: actions/checkout@v7
+              with:
+                  submodules: recursive
+
+            - name: Install native dependencies
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y libtiff-dev libopenexr-dev
+
+            - name: Install Vulkan SDK
+              uses: jakoch/install-vulkan-sdk-action@v1.6.0
+              with:
+                  vulkan_version: 1.4.357.0
+                  cache: true
+                  stripdown: true
+                  github_token: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Compile shaders
+              run: |
+                  cmake -S app/native/vulkan -B .build/precompiled-shaders -DCMAKE_BUILD_TYPE=Release
+                  cmake --build .build/precompiled-shaders --target gdc_vulkan_shaders --parallel
+
+            - name: Upload shaders
+              uses: actions/upload-artifact@v7
+              with:
+                  name: vulkan-shaders
+                  path: .build/precompiled-shaders/shaders/*.spv
+                  if-no-files-found: error
+
+    build:
+        name: ${{ matrix.platform }}-${{ matrix.arch }}
+        needs: shaders
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - platform: linux
+                      arch: x64
+                      os: ubuntu-24.04
+                      vulkan: true
+                      precompiled_shaders: true
+                    - platform: linux
+                      arch: arm64
+                      os: ubuntu-24.04-arm
+                      vulkan: true
+                      precompiled_shaders: true
+                    - platform: windows
+                      arch: x64
+                      os: windows-2025
+                      vulkan: true
+                      precompiled_shaders: true
+                    - platform: windows
+                      arch: arm64
+                      os: windows-11-arm
+                      vulkan: true
+                      precompiled_shaders: true
+                      cc: clang
+                      cxx: clang++
+                    - platform: macos
+                      arch: arm64
+                      os: macos-15
+                      vulkan: false
+
+        steps:
+            - name: Check out source
+              uses: actions/checkout@v7
+              with:
+                  submodules: recursive
+
+            - name: Set up Python
+              uses: actions/setup-python@v7
+              with:
+                  python-version: "3.13"
+
+            - name: Set up Go
+              uses: actions/setup-go@v7
+              with:
+                  go-version-file: go.mod
+                  cache: true
+
+            - name: Install Linux dependencies
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y \
+                      gcc g++ nasm ninja-build \
+                      libtiff-dev libopenexr-dev \
+                      libx11-dev libxcursor-dev libxrandr-dev \
+                      libxinerama-dev libxi-dev libglx-dev \
+                      libgl1-mesa-dev libxxf86vm-dev
+
+            - name: Install macOS dependencies
+              if: runner.os == 'macOS'
+              run: brew install nasm
+
+            - name: Install Vulkan SDK
+              if: matrix.vulkan
+              uses: jakoch/install-vulkan-sdk-action@v1.6.0
+              with:
+                  vulkan_version: 1.4.357.0
+                  cache: true
+                  stripdown: true
+                  github_token: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Download precompiled shaders
+              if: matrix.precompiled_shaders
+              uses: actions/download-artifact@v8
+              with:
+                  name: vulkan-shaders
+                  path: precompiled-shaders
+
+            - name: Build release package
+              env:
+                  CC: ${{ matrix.cc }}
+                  CXX: ${{ matrix.cxx }}
+                  GDC_PRECOMPILED_SHADER_DIR: ${{ matrix.precompiled_shaders && format('{0}/precompiled-shaders', github.workspace) || '' }}
+              run: python build_release.py --clean --${{ matrix.platform }} --${{ matrix.arch }} --no-upx
+
+            - name: Prepare artifact
+              run: python -c "import zipfile; zipfile.ZipFile(r'dist/goDragonCooker-${{ matrix.platform }}-${{ matrix.arch }}.zip').extractall('artifact')"
+
+            - name: Upload package
+              uses: actions/upload-artifact@v7
+              with:
+                  name: goDragonCooker-${{ matrix.platform }}-${{ matrix.arch }}
+                  path: artifact/
+                  if-no-files-found: error
+
+    release:
+        if: startsWith(github.ref, 'refs/tags/v')
+        needs: build
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: write
+        steps:
+            - name: Download packages
+              uses: actions/download-artifact@v8
+              with:
+                  pattern: goDragonCooker-*
+                  path: packages
+
+            - name: Create release archives
+              run: |
+                  python - <<'PY'
+                  from pathlib import Path
+                  from zipfile import ZIP_DEFLATED, ZipFile
+
+                  output = Path("dist")
+                  output.mkdir()
+                  for package in Path("packages").iterdir():
+                      if not package.is_dir():
+                          continue
+                      for executable in package.rglob("goDragonCooker.*"):
+                          executable.chmod(0o755)
+                      with ZipFile(output / f"{package.name}.zip", "w", ZIP_DEFLATED) as archive:
+                          for path in sorted(package.rglob("*")):
+                              if path.is_file():
+                                  archive.write(path, path.relative_to(package))
+                  PY
+
+            - name: Publish GitHub release
+              uses: softprops/action-gh-release@v3
+              with:
+                  files: dist/*.zip
+                  generate_release_notes: true

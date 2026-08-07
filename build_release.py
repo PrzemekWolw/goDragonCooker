@@ -437,7 +437,7 @@ def darwin_compiler_env(target: dict) -> dict[str, str]:
     if not shutil.which("clang") or not shutil.which("clang++"):
         log("macOS builds require clang and clang++.", error=True)
         sys.exit(1)
-    arch_flag = target["goarch"]
+    arch_flag = "x86_64" if target["goarch"] == "amd64" else target["goarch"]
     return {
         "CC": "clang",
         "CXX": "clang++",
@@ -643,9 +643,16 @@ def build_vulkan(targets: list[dict], skip: bool):
         ]
         if os.environ.get("VULKAN_SDK"):
             configure.append(f"-DCMAKE_PREFIX_PATH={os.environ['VULKAN_SDK']}")
+        if os.environ.get("GDC_PRECOMPILED_SHADER_DIR"):
+            configure.append(
+                f"-DGDC_PRECOMPILED_SHADER_DIR={os.environ['GDC_PRECOMPILED_SHADER_DIR']}"
+            )
         if env.get("CXX"):
             configure.append(f"-DCMAKE_CXX_COMPILER={env['CXX']}")
-            if "g++" in Path(env["CXX"]).name:
+            compiler_name = Path(env["CXX"]).name.lower()
+            if target["platform"] == "windows" and "clang" in compiler_name:
+                configure[1:1] = ["-G", "Ninja"]
+            elif "g++" in compiler_name:
                 configure[1:1] = ["-G", "MinGW Makefiles"]
         run(configure, env=env)
         run(["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", str(CPU_THREADS)], env=env)
