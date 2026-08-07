@@ -60,23 +60,11 @@ jobs:
                       os: ubuntu-24.04
                       vulkan: true
                       precompiled_shaders: true
-                    - platform: linux
-                      arch: arm64
-                      os: ubuntu-24.04-arm
-                      vulkan: true
-                      precompiled_shaders: true
                     - platform: windows
                       arch: x64
                       os: windows-2025
                       vulkan: true
                       precompiled_shaders: true
-                    - platform: windows
-                      arch: arm64
-                      os: windows-11-arm
-                      vulkan: true
-                      precompiled_shaders: true
-                      cc: clang
-                      cxx: clang++
                     - platform: macos
                       arch: arm64
                       os: macos-15
@@ -104,7 +92,7 @@ jobs:
               run: |
                   sudo apt-get update
                   sudo apt-get install -y \
-                      gcc g++ nasm ninja-build \
+                      gcc g++ nasm ninja-build upx-ucl \
                       libtiff-dev libopenexr-dev \
                       libx11-dev libxcursor-dev libxrandr-dev \
                       libxinerama-dev libxi-dev libglx-dev \
@@ -112,7 +100,11 @@ jobs:
 
             - name: Install macOS dependencies
               if: runner.os == 'macOS'
-              run: brew install nasm
+              run: brew install nasm upx
+
+            - name: Install Windows dependencies
+              if: runner.os == 'Windows'
+              run: choco install upx -y
 
             - name: Install Vulkan SDK
               if: matrix.vulkan
@@ -132,10 +124,8 @@ jobs:
 
             - name: Build release package
               env:
-                  CC: ${{ matrix.cc }}
-                  CXX: ${{ matrix.cxx }}
                   GDC_PRECOMPILED_SHADER_DIR: ${{ matrix.precompiled_shaders && format('{0}/precompiled-shaders', github.workspace) || '' }}
-              run: python build_release.py --clean --${{ matrix.platform }} --${{ matrix.arch }} --no-upx
+              run: python build_release.py --clean --${{ matrix.platform }} --${{ matrix.arch }}
 
             - name: Prepare artifact
               run: python -c "import zipfile; zipfile.ZipFile(r'dist/goDragonCooker-${{ matrix.platform }}-${{ matrix.arch }}.zip').extractall('artifact')"

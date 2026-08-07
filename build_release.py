@@ -754,6 +754,10 @@ def build_target(
     elif target["platform"] == "macos":
         env.update(darwin_compiler_env(target))
 
+    if target["goarch"] == "arm64":
+        for flag_name in ("CGO_CFLAGS", "CGO_CXXFLAGS"):
+            env[flag_name] = f"{env.get(flag_name, '')} -fsigned-char".strip()
+
     binary.parent.mkdir(parents=True, exist_ok=True)
     tmp_binary = binary.parent / f".build_{name}{binary.suffix}"
 
