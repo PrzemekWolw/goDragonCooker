@@ -1,5 +1,10 @@
 # goDragonCooker
 
+[![Build](https://github.com/PrzemekWolw/goDragonCooker/actions/workflows/build.yml/badge.svg)](https://github.com/PrzemekWolw/goDragonCooker/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/PrzemekWolw/goDragonCooker)](https://github.com/PrzemekWolw/goDragonCooker/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/PrzemekWolw/goDragonCooker/total)](https://github.com/PrzemekWolw/goDragonCooker/releases)
+[![VirusTotal](https://img.shields.io/badge/VirusTotal-submitted-394eff?logo=virustotal&logoColor=white)](https://github.com/PrzemekWolw/goDragonCooker/actions/workflows/build.yml)
+
 goDragonCooker is a desktop utility for preparing BeamNG texture and material files.
 
 | Material Generator | Texture Cooker |

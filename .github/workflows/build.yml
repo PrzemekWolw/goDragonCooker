@@ -169,6 +169,34 @@ jobs:
                                   archive.write(path, path.relative_to(package))
                   PY
 
+            - name: Submit packages to VirusTotal
+              env:
+                  VIRUSTOTAL_API_KEY: ${{ secrets.VIRUSTOTAL_API_KEY }}
+              run: |
+                  echo "## VirusTotal submissions" >> "$GITHUB_STEP_SUMMARY"
+                  if [[ -z "$VIRUSTOTAL_API_KEY" ]]; then
+                      echo "Skipped because the VIRUSTOTAL_API_KEY secret is not configured." >> "$GITHUB_STEP_SUMMARY"
+                      exit 0
+                  fi
+
+                  for archive in dist/*.zip; do
+                      upload_url="https://www.virustotal.com/api/v3/files"
+                      if (( $(stat -c%s "$archive") > 33554432 )); then
+                          upload_url=$(curl --fail --silent --show-error \
+                              --header "x-apikey: $VIRUSTOTAL_API_KEY" \
+                              "https://www.virustotal.com/api/v3/files/upload_url" |
+                              jq -r ".data")
+                      fi
+
+                      response=$(curl --fail --silent --show-error \
+                          --request POST \
+                          --header "x-apikey: $VIRUSTOTAL_API_KEY" \
+                          --form "file=@$archive" \
+                          "$upload_url")
+                      analysis_id=$(jq -r ".data.id" <<< "$response")
+                      echo "- [$(basename "$archive")](https://www.virustotal.com/gui/file-analysis/$analysis_id)" >> "$GITHUB_STEP_SUMMARY"
+                  done
+
             - name: Publish GitHub release
               uses: softprops/action-gh-release@v3
               with:
