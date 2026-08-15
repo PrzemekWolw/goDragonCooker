@@ -31,7 +31,11 @@ if(NOT OpenEXR_FOUND)
     set(OPENEXR_INSTALL OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         openexr
-        URL https://github.com/AcademySoftwareFoundation/openexr/archive/refs/tags/v3.4.2.tar.gz
+        # Keep in sync with the OpenEXR pin in Texconv-Custom-DLL. Must be new
+        # enough that the vendored deflate no longer uses `evex512` target
+        # attributes (unknown to GCC 16; v3.4.2 fails, v3.4.14 builds) and that
+        # `internal_thread.h` works on modern glibc (v3.4.9+, upstream PR #2262).
+        URL https://github.com/AcademySoftwareFoundation/openexr/archive/refs/tags/v3.4.14.tar.gz
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
     FetchContent_MakeAvailable(openexr)
 endif()

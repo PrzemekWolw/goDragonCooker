@@ -5,7 +5,10 @@ repository root.
 
 ## Checkout
 
-Both native backends are Git submodules:
+Both native backends are Git submodules. `Texconv-Custom-DLL` has nested
+submodules of its own (DirectXTex, DirectX-Headers, DirectXMath,
+safestringlib), so the `--recursive` flag is required - without it the
+Texconv CMake configuration fails on the empty `DirectXTex/` directory:
 
 ```bash
 git submodule update --init --recursive
@@ -17,6 +20,7 @@ git submodule update --init --recursive
 - Go 1.26.5 or newer with cgo enabled
 - C and C++ compilers for every selected target
 - CMake 3.21 or newer
+- nasm (Texconv JPEG support builds libjpeg-turbo with its SIMD extensions)
 - Network access for first-time dependency and Linux Vulkan SDK downloads
 - UPX, optionally
 
@@ -33,6 +37,25 @@ through the bundled library directory.
 
 UPX is optional. The build continues without executable compression when it is
 not installed.
+
+## Pinned third-party dependencies
+
+Both backends build their codec dependencies from source with pinned versions:
+
+| Dependency | Version | Used by |
+| --- | --- | --- |
+| OpenEXR | v3.4.14 | Texconv, Compressonator Vulkan |
+| libjpeg-turbo | 3.1.3 | Texconv (JPEG) |
+| libpng | v1.6.54 | Texconv (PNG) |
+| zlib | v1.3.1.2 | Texconv (via libpng) |
+| libtiff | v4.7.1 | Compressonator Vulkan (fallback when no system package) |
+
+Keep the two OpenEXR pins in sync: `third_party/Texconv-Custom-DLL/CMakeLists.txt`
+and `app/native/vulkan/CMakeLists.txt`. The pin must be v3.4.9 or newer so
+`internal_thread.h` works on modern glibc (conflicting `once_flag`/`call_once`,
+upstream OpenEXR PR #2262), and new enough that the vendored deflate no longer
+uses `evex512` target attributes, which GCC 16 rejects (v3.4.2 does not
+compile; v3.4.14 does).
 
 ## Build a release
 

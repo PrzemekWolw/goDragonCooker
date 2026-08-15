@@ -61,10 +61,17 @@ drivers normally install the platform Vulkan loader (`vulkan-1.dll` on Windows
 or `libvulkan.so.1` on Linux); all other native dependencies are included in
 the release archive.
 
-For development on Linux, `build_release.py` downloads and caches the LunarG
-Vulkan SDK automatically when the native Vulkan library needs rebuilding and
-`VULKAN_SDK` is unset. On Windows, set `VULKAN_SDK` to an SDK containing DXC
-before building. Then run `go run ./app` from the repository root.
+For development, first initialize the native backends with
+`git submodule update --init --recursive`. On Linux, `build_release.py` also
+downloads and caches the LunarG Vulkan SDK automatically when the native
+Vulkan library needs rebuilding and `VULKAN_SDK` is unset. On Windows, set
+`VULKAN_SDK` to an SDK containing DXC before building. Then run
+`go run ./app` from the repository root.
+
+The native backends are built from pinned sources under `third_party/` on
+first run (network and nasm are required for the Texconv JPEG codec). See
+[BUILD.md](BUILD.md) for the full prerequisite list and the pinned
+dependency versions.
 
 ## License
 
