@@ -43,6 +43,13 @@ BMP, TGA, HDR, TIFF, and EXR sources.
 - Linux x64 and ARM64: Compressonator Vulkan and Texconv.
 - macOS x64 and ARM64: Texconv only, built on macOS with the Apple SDK.
 
+GitHub Actions builds the Windows and Linux x64 and ARM64 release archives
+(`.github/workflows/build.yml`): Linux ARM64 is compiled natively on an ARM64
+runner, and Windows ARM64 is compiled natively on GitHub's hosted
+`windows-11-arm` (Windows-on-ARM) runner — both ARM64 targets run on native
+ARM64 hosts, since Go's cgo Windows linker needs a native aarch64 mingw-w64
+that cannot be cross-compiled from an x64 host.
+
 See [BUILD.md](BUILD.md) for build instructions.
 
 ## Running

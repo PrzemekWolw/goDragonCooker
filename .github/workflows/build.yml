@@ -60,9 +60,19 @@ jobs:
                       os: ubuntu-24.04
                       vulkan: true
                       precompiled_shaders: true
+                    - platform: linux
+                      arch: arm64
+                      os: ubuntu-24.04-arm
+                      vulkan: true
+                      precompiled_shaders: true
                     - platform: windows
                       arch: x64
                       os: windows-2025
+                      vulkan: true
+                      precompiled_shaders: true
+                    - platform: windows
+                      arch: arm64
+                      os: windows-11-arm
                       vulkan: true
                       precompiled_shaders: true
                     - platform: macos
@@ -104,7 +114,7 @@ jobs:
 
             - name: Install Windows dependencies
               if: runner.os == 'Windows'
-              run: choco install upx -y
+              run: choco install nasm upx -y
 
             - name: Install Vulkan SDK
               if: matrix.vulkan
@@ -139,7 +149,7 @@ jobs:
 
     release:
         if: startsWith(github.ref, 'refs/tags/v')
-        needs: build
+        needs: [build]
         runs-on: ubuntu-24.04
         permissions:
             contents: write

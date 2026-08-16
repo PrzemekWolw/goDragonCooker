@@ -24,6 +24,26 @@ git submodule update --init --recursive
 - Network access for first-time dependency and Linux Vulkan SDK downloads
 - UPX, optionally
 
+The `giu`/`cimgui-go` GUI toolkit ships prebuilt `cimgui.a`/`libglfw3.a` static
+libraries only for Linux x64, macOS, and Windows x64. For the unshipped **Linux
+ARM64** and **Windows ARM64** targets, `build_release.py` first runs
+`go mod download` (so the module is in the cache), resolves the module directory
+via `go list -m`, then builds those two static libraries from the `cimgui-go`
+module's C++ sources before the Go build. That needs CMake and a C/C++ compiler
+for the target, and — for Linux — the X11/OpenGL development headers, which the
+build symlinks from the host when cross-compiling.
+
+**Windows ARM64 cannot be cross-compiled from an x64 host.** A Go cgo build for
+`GOOS=windows GOARCH=arm64` requires an aarch64 MSVC-ABI linker, which on the
+`windows-11-arm` runner comes from **clang/clang++** (the runner's default `gcc` is
+the x86_64 MinGW, and MSVC `cl.exe` cannot be Go's cgo linker). MSYS2 does not package
+an aarch64 MinGW-w64 cross-compiler (its `mingw-w64-ucrt-aarch64-gcc` does not exist).
+So Windows ARM64 must be built **
+natively on a Windows-on-ARM machine** (GitHub's hosted `windows-11-arm` runner) —
+the same code path the Linux ARM64 CI job uses. Linux ARM64, by contrast, is built
+natively on an `ubuntu-24.04-arm` runner (a pure x86_64 cross toolchain without the
+aarch64 `libGL`/`libX11` runtime libraries cannot complete the final link).
+
 Windows Vulkan native builds require a Vulkan SDK with `VULKAN_SDK` set and
 SPIR-V-capable DXC in `VULKAN_SDK/bin` or `VULKAN_SDK/Bin`. On Linux, the
 build script downloads the latest LunarG Vulkan SDK automatically when
@@ -105,13 +125,53 @@ python build_release.py --skip-vulkan
 - `--x64` and `--arm64` select an architecture.
 - Target, cleanup, and compression options can be combined.
 
+## Release builds in CI
+
+`.github/workflows/build.yml` produces the release archives on push to `master`,
+for version tags, and on pull requests. The `shaders` job compiles the SPIR-V
+shaders once (architecture-independent), then:
+
+| Job | Target(s) | Runner | Notes |
+| --- | --- | --- | --- |
+| `build` (matrix) | Linux x64 | `ubuntu-24.04` | native |
+| `build` (matrix) | Linux ARM64 | `ubuntu-24.04-arm` | native ARM64 |
+| `build` (matrix) | Windows x64 | `windows-2025` | native |
+| `build` (matrix) | Windows ARM64 | `windows-11-arm` | **native** Windows-on-ARM hosted runner |
+| `build` (matrix) | macOS ARM64 | `macos-15` | Texconv only |
+
+Every target is a row in the single `build` matrix job (each row pins its own
+`runs-on` runner). The Windows ARM64 row runs natively on GitHub's hosted
+`windows-11-arm` (Windows-on-ARM) runner, so it needs no self-hosting and is not a
+cross-compile. All five rows feed the `release` job. The cimgui-go ARM64 static
+libraries are built automatically for every ARM64 target that the module does not
+ship (see Common prerequisites).
+
 ## Building on Windows
 
-Windows builds require:
+Windows x64 builds require:
 
-- MinGW-w64 or LLVM C and C++ compilers on `PATH`
-- Visual Studio C++ tools, ARM64 build tools, and the Windows SDK for Windows Texconv libraries
-- `x86_64-linux-gnu-gcc/g++` and `aarch64-linux-gnu-gcc/g++` when building Linux targets
+- MinGW-w64 or LLVM C and C++ compilers on `PATH` (Windows x64)
+- Visual Studio C++ tools and the Windows SDK for the Windows Texconv libraries
+- `x86_64-linux-gnu-gcc/g++` when building Linux targets
+
+Windows **ARM64** builds must run natively on a Windows-on-ARM machine (GitHub's
+hosted `windows-11-arm` runner, or your own ARM64 Windows box). The runner image's
+default `gcc` is the **x86_64 MinGW** (`C:\mingw64`) — **not** aarch64 — so the build
+does not rely on it. Two toolchains are used, both producing aarch64 MSVC-ABI:
+
+- **clang/clang++** (LLVM) for the cimgui-go and GLFW static libraries and for the
+go/cgo step — Go on `windows/arm64` requires the MSVC ABI, which clang supplies (MSVC
+`cl.exe` cannot be Go's cgo linker, and MSYS2 has no aarch64 MinGW). If that clang
+defaults to a non-aarch64 triple, the build pins `-target aarch64-pc-windows-msvc`
+so the output is aarch64 either way.
+- **MSVC `cl.exe`** (`Visual Studio 2022` + `-A ARM64`) for the Compressonator
+Vulkan backend, because OpenEXR's `internal_zip.c` selects MSVC's `<arm64_neon.h>`
+under `_MSC_VER`, whose NEON intrinsics need MSVC's own `neon_*` helper symbols that
+clang cannot provide (`undefined symbol: neon_zip1_q8`). `gdc_vulkan.dll` is a
+self-contained C-ABI DLL loaded at runtime, so its MSVC ABI is independent of the
+clang-built executable.
+
+Cross-compiling from x64 is not possible — see Common prerequisites.
 
 Native libraries are built only for targets matching the host operating
 system. To package Linux releases on Windows, first place Linux Texconv and
@@ -128,8 +188,12 @@ Linux builds require:
 
 - GCC and G++
 - `curl` if the automatic Vulkan SDK download needs its fallback downloader
-- x86_64 and aarch64 MinGW-w64 cross-compilers when building Windows targets
-- `aarch64-linux-gnu-gcc/g++` for Linux ARM64 Texconv builds
+- `x86_64` MinGW-w64 cross-compilers when building **Windows x64** targets
+  (Windows ARM64 must be built on a native ARM64 host — see Building on Windows)
+- For Linux ARM64, either a native ARM64 host (simplest; used by CI) or the
+  `aarch64-linux-gnu-gcc/g++` cross compiler **plus** the aarch64 OpenGL and X11
+  runtime libraries — the Go binary links against `libGL`/`libX11`, so a pure
+  cross toolchain without those aarch64 libs cannot complete the final link
 - The X11 and OpenGL development packages required by GIU
 
 Debian or Ubuntu:

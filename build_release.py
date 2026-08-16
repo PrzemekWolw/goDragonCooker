@@ -64,6 +64,12 @@ APP_VERSION = VERSION_FILE.read_text(encoding="utf-8").strip()
 CPU_THREADS = max(1, os.cpu_count() or 1)
 VULKAN_BUILD_OUTPUTS: dict[str, Path] = {}
 BINARY_BUILD_OUTPUTS: dict[str, Path] = {}
+# cimgui-go only ships prebuilt static libs for linux/x64, macos/x64, macos/arm64 and
+# windows/x64. The (goos, goarch) pairs below are *not* shipped and must be built from the
+# module's C++ sources before the matching go/cgo target can link.
+CIMGUI_UNSHIPPED = {("linux", "arm64"), ("windows", "arm64")}
+CIMGUI_BUILD_OUTPUTS: dict[tuple[str, str], dict] = {}
+cimgui_module_dir_cache: Path | None = None
 
 def make_target(platform_name: str, goos: str, goarch: str, arch_name: str) -> dict:
     name = f"{platform_name}-{arch_name}"
@@ -111,6 +117,23 @@ def vulkan_runtime_libraries(directory: Path, platform_name: str) -> list[Path]:
     return libraries
 
 
+def library_arch_matches_host(library: Path, readelf: str) -> bool:
+    """True when *library* targets the host architecture (safe to resolve with ldd)."""
+    host = platform.machine().lower()
+    host_is_arm = host in {"aarch64", "arm64"}
+    result = run([readelf, "-h", str(library)], check=False)
+    for line in result.stdout.splitlines():
+        if "Machine:" not in line:
+            continue
+        machine = line.split(":", 1)[1].strip().lower()
+        if "aarch64" in machine:
+            return True == host_is_arm
+        if "x86-64" in machine or "advanced micro" in machine:
+            return False == host_is_arm
+        return True
+    return True
+
+
 def verify_vulkan_runtime(library: Path, directory: Path, platform_name: str):
     if platform_name == "windows":
         try:
@@ -133,19 +156,22 @@ def verify_vulkan_runtime(library: Path, directory: Path, platform_name: str):
         )
         sys.exit(1)
 
-    dependencies = run(["ldd", str(library)])
-    if "not found" in dependencies.stdout:
-        log(f"Unresolved Vulkan runtime dependency:\n{dependencies.stdout}", error=True)
-        sys.exit(1)
-    bundled = {path.name for path in vulkan_runtime_libraries(directory, "linux")}
-    for line in dependencies.stdout.splitlines():
-        if "=>" not in line:
-            continue
-        name, resolved = (part.strip() for part in line.split("=>", 1))
-        resolved_path = resolved.split(" ", 1)[0]
-        if name in bundled and Path(resolved_path).resolve().parent != directory.resolve():
-            log(f"{name} resolved outside the package: {resolved_path}", error=True)
+    # ldd can only resolve dependencies for the host's own architecture, so skip it when the
+    # library was cross-compiled for a different architecture (e.g. aarch64 on an x86_64 host).
+    if library_arch_matches_host(library, readelf):
+        dependencies = run(["ldd", str(library)])
+        if "not found" in dependencies.stdout:
+            log(f"Unresolved Vulkan runtime dependency:\n{dependencies.stdout}", error=True)
             sys.exit(1)
+        bundled = {path.name for path in vulkan_runtime_libraries(directory, "linux")}
+        for line in dependencies.stdout.splitlines():
+            if "=>" not in line:
+                continue
+            name, resolved = (part.strip() for part in line.split("=>", 1))
+            resolved_path = resolved.split(" ", 1)[0]
+            if name in bundled and Path(resolved_path).resolve().parent != directory.resolve():
+                log(f"{name} resolved outside the package: {resolved_path}", error=True)
+                sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -198,8 +224,11 @@ def run(
     )
     if check and result.returncode != 0:
         log(f"Command failed (exit {result.returncode}):", error=True)
-        if result.stderr:
-            for line in result.stderr.strip().splitlines()[-20:]:
+        # Build tools (ninja, gmake, cmake) usually write the real error to stdout, so
+        # surface both streams' tails rather than stderr alone.
+        lines = (result.stderr or "").splitlines()[-20:] + (result.stdout or "").splitlines()[-30:]
+        for line in lines:
+            if line.strip():
                 log(f"  {line}", error=True)
         sys.exit(result.returncode)
     return result
@@ -277,32 +306,96 @@ def compiler_env_with_runtime(env: dict[str, str]) -> dict[str, str]:
     return result
 
 
+def _cc_dumpmachine(cc: str) -> str:
+    try:
+        return run([cc, "-dumpmachine"], check=False).stdout.strip()
+    except Exception:
+        return ""
+
+
+def _is_clang(compiler: str) -> bool:
+    return bool(compiler) and "clang" in Path(compiler).name.lower()
+
+
+def windows_arm64_target_flags(target: dict, compiler: str) -> list[str]:
+    """Force the aarch64 MSVC target when clang does not already default to it.
+
+    A clang on a Windows-on-ARM runner is usually a native aarch64 build (no override
+    needed). But an x86_64 LLVM build defaults to an x86_64 triple; in that case we pin
+    the target so the emitted objects are still aarch64 -- Go on windows/arm64 requires
+    the MSVC ABI, which only clang can produce here (a MinGW fallback is useless).
+    Only applies to the Windows ARM64 target with clang.
+    """
+    if target["goos"] != "windows" or target["goarch"] != "arm64":
+        return []
+    if not _is_clang(compiler):
+        return []
+    machine = _cc_dumpmachine(compiler).lower()
+    if "aarch64" in machine or "arm64" in machine:
+        return []
+    return ["-target", "aarch64-pc-windows-msvc"]
+
+
 def windows_compiler_env(target: dict) -> dict[str, str]:
     """Return a usable C/C++ compiler environment for a Windows build."""
     if os.environ.get("CC") and os.environ.get("CXX"):
-        return compiler_env_with_runtime({"CC": os.environ["CC"], "CXX": os.environ["CXX"]})
-
-    if platform.system() == "Windows":
-        if target["goarch"] == "arm64":
-            compiler_pairs = [
-                ("aarch64-w64-mingw32-gcc", "aarch64-w64-mingw32-g++"),
-            ]
-        else:
-            compiler_pairs = [("gcc", "g++"), ("clang", "clang++")]
+        chosen = {"CC": os.environ["CC"], "CXX": os.environ["CXX"]}
     else:
-        prefix = "aarch64" if target["goarch"] == "arm64" else "x86_64"
-        compiler_pairs = [(f"{prefix}-w64-mingw32-gcc", f"{prefix}-w64-mingw32-g++")]
+        if platform.system() == "Windows":
+            if target["goarch"] == "arm64":
+                # An ARM64 target needs a compiler that actually targets aarch64. The
+                # default gcc on a Windows-on-ARM runner is the x86_64 MinGW, so prefer a
+                # native aarch64 toolchain (clang or an aarch64 MinGW) over the x64 one.
+                compiler_pairs = [
+                    ("clang", "clang++"),
+                    ("aarch64-w64-mingw32-gcc", "aarch64-w64-mingw32-g++"),
+                    ("arm64-w64-mingw32-gcc", "arm64-w64-mingw32-g++"),
+                    ("gcc", "g++"),
+                ]
+            else:
+                compiler_pairs = [("gcc", "g++"), ("clang", "clang++")]
+        else:
+            prefix = "aarch64" if target["goarch"] == "arm64" else "x86_64"
+            compiler_pairs = [(f"{prefix}-w64-mingw32-gcc", f"{prefix}-w64-mingw32-g++")]
 
-    for cc, cxx in compiler_pairs:
-        if shutil.which(cc) and shutil.which(cxx):
-            return compiler_env_with_runtime({"CC": cc, "CXX": cxx})
+        chosen = None
+        for cc, cxx in compiler_pairs:
+            if not (shutil.which(cc) and shutil.which(cxx)):
+                continue
+            machine = _cc_dumpmachine(cc)
+            low = machine.lower()
+            if target["goarch"] == "arm64":
+                log(f"  candidate {cc} -> {machine or 'unknown'}", info=False)
+                # clang is always acceptable for an ARM64 target: we pin the aarch64
+                # -target on the command line, so its default triple does not matter. A
+                # MinGW/gcc only works if it already targets aarch64 (the x86_64 MinGW is
+                # exactly what we must avoid -- its linker cannot consume aarch64 libs).
+                if not _is_clang(cc) and "aarch64" not in low and "arm64" not in low:
+                    continue
+            chosen = {"CC": cc, "CXX": cxx}
+            break
 
-    log(
-        f"No C/C++ compiler found for the Windows {target['arch_name']} build. "
-        "Install MinGW-w64 or LLVM, or set CC and CXX.",
-        error=True,
-    )
-    sys.exit(1)
+        if chosen is None:
+            log(
+                f"No usable C/C++ compiler found for the Windows {target['arch_name']} build "
+                f"(tried: {', '.join(cc for cc, _ in compiler_pairs)}). "
+                + (
+                    "Windows ARM64 needs a native aarch64 compiler (clang or aarch64 MinGW-w64) "
+                    "-- install an ARM64 LLVM toolchain or point CC/CXX at one."
+                    if target["goarch"] == "arm64"
+                    else "Install MinGW-w64 or LLVM, or set CC and CXX."
+                ),
+                error=True,
+            )
+            sys.exit(1)
+
+    if _cc_dumpmachine(chosen["CC"]):
+        log(
+            f"  Windows {target['arch_name']} C/C++ compiler: {chosen['CC']} -> {_cc_dumpmachine(chosen['CC'])}",
+            info=False,
+        )
+
+    return compiler_env_with_runtime(chosen)
 
 
 def linux_compiler_env(target: dict) -> dict[str, str]:
@@ -314,7 +407,10 @@ def linux_compiler_env(target: dict) -> dict[str, str]:
         return compiler_env_with_runtime({"CC": os.environ["CC"], "CXX": os.environ["CXX"]})
 
     prefix = "aarch64" if target["goarch"] == "arm64" else "x86_64"
-    compiler_pairs = [(f"{prefix}-linux-gnu-gcc", f"{prefix}-linux-gnu-g++")]
+    compiler_pairs = [
+        (f"{prefix}-linux-gnu-gcc", f"{prefix}-linux-gnu-g++"),
+        (f"{prefix}-suse-linux-gcc", f"{prefix}-suse-linux-g++"),
+    ]
     for cc, cxx in compiler_pairs:
         if shutil.which(cc) and shutil.which(cxx):
             return compiler_env_with_runtime({"CC": cc, "CXX": cxx})
@@ -444,6 +540,222 @@ def darwin_compiler_env(target: dict) -> dict[str, str]:
         "CGO_CFLAGS": f"-arch {arch_flag}",
         "CGO_LDFLAGS": f"-arch {arch_flag}",
     }
+
+
+# ---------------------------------------------------------------------------
+# cimgui-go (arm64 static libs)
+# ---------------------------------------------------------------------------
+
+# cimgui-go ships prebuilt cimgui.a/libglfw3.a only for linux/x64, macos/x64, macos/arm64
+# and windows/x64. For the remaining arm64 targets (linux, windows) we build the static
+# libs from the module's C++ sources, then point CGO_LDFLAGS at them so the go/cgo link
+# succeeds. This is the fix for "imgui doesn't give arm64 builds".
+def cimgui_module_dir() -> Path:
+    """Resolve the cimgui-go module directory (source of the C/C++ static libs)."""
+    global cimgui_module_dir_cache
+    if cimgui_module_dir_cache is None:
+        # `go list -m -f {{.Dir}}` returns an empty Dir until the module has been
+        # extracted into the module cache. On a clean CI checkout the cache is
+        # empty, so download it first (a no-op when already present).
+        run(
+            ["go", "mod", "download", "github.com/AllenDang/cimgui-go"],
+            check=False,
+        )
+        result = run(
+            ["go", "list", "-m", "-f", "{{.Dir}}", "github.com/AllenDang/cimgui-go"],
+            check=False,
+        )
+        path = result.stdout.strip()
+        if not path:
+            log("Could not resolve the cimgui-go module directory", error=True)
+            sys.exit(1)
+        cimgui_module_dir_cache = Path(path)
+    return cimgui_module_dir_cache
+
+
+def cimgui_needs_build(target: dict) -> bool:
+    return (target["goos"], target["goarch"]) in CIMGUI_UNSHIPPED
+
+
+def cimgui_include_shim() -> Path:
+    """Expose arch-independent X11/GL/KHR headers for cross-compiling the C++ sources.
+
+    The aarch64 cross sysroot lacks these; the host's are pure declarations and safe to
+    share (Linux only; Windows gets GL from the mingw/MSVC toolchain).
+    """
+    shim = PROJECT / ".build" / "cimgui-include"
+    shim.mkdir(parents=True, exist_ok=True)
+    for name in ("X11", "GL", "KHR"):
+        source = Path("/usr/include") / name
+        link = shim / name
+        if source.is_dir() and not link.exists():
+            try:
+                link.symlink_to(source)
+            except OSError:
+                pass
+    return shim
+
+
+def _find_static_lib(directory: Path, *names: str) -> Path | None:
+    """First existing static lib in *directory* among *names* (in order)."""
+    for name in names:
+        path = directory / name
+        if path.exists():
+            return path
+    return None
+
+
+def _find_built_lib(build_dir: Path, *names: str) -> Path | None:
+    """First file matching any *names* glob anywhere under *build_dir*."""
+    for name in names:
+        hit = next(build_dir.rglob(name), None)
+        if hit is not None:
+            return hit
+    return None
+
+
+def cimgui_go_flags(target: dict) -> dict[str, str]:
+    """CGO flags that let the arm64 go target link the freshly built static libs.
+
+    The static libs are named by the toolchain: MinGW emits `cimgui.a`/`libglfw3.a`,
+    while the Windows MSVC/clang path emits `cimgui.lib`/`glfw3.lib`. Discover the real
+    files rather than assuming an extension.
+    """
+    out_dir = PROJECT / ".build" / f"cimgui-{target['goos']}-{target['goarch']}"
+    cimgui_lib = _find_static_lib(out_dir, "cimgui.a", "cimgui.lib")
+    glfw_lib = _find_static_lib(out_dir, "libglfw3.a", "glfw3.lib", "libglfw3.lib")
+    if target["goos"] == "windows":
+        # Go's cgo rejects a bare path to a static lib on Windows ("invalid flag in
+        # go:cgo_ldflag"). Link via a -L search path + the exact-file form (-l:NAME),
+        # which is exactly how cimgui-go's own `#cgo LDFLAGS` references its shipped
+        # windows libs (e.g. `-L.../lib/windows/x64 -l:cimgui.a`).
+        cimgui_name = cimgui_lib.name if cimgui_lib else "cimgui.a"
+        glfw_name = glfw_lib.name if glfw_lib else "libglfw3.a"
+        ldflags = f"-L{out_dir} -l:{cimgui_name} -l:{glfw_name} -lgdi32 -lopengl32 -limm32"
+    else:
+        cimgui_ref = str(cimgui_lib) if cimgui_lib else str(out_dir / "cimgui.a")
+        glfw_ref = str(glfw_lib) if glfw_lib else str(out_dir / "libglfw3.a")
+        ldflags = f"{cimgui_ref} {glfw_ref} -ldl -lGL -lX11"
+    flags = {"CGO_LDFLAGS": ldflags}
+    shim = PROJECT / ".build" / "cimgui-include"
+    if target["goos"] != "windows" and ((shim / "GL").exists() or (shim / "X11").exists()):
+        flags["CGO_CFLAGS"] = f"-isystem {shim}"
+        flags["CGO_CXXFLAGS"] = f"-isystem {shim}"
+    return flags
+
+
+def build_cimgui_target(target: dict) -> None:
+    name = target["name"]
+    out_dir = PROJECT / ".build" / f"cimgui-{target['goos']}-{target['goarch']}"
+    if _find_static_lib(out_dir, "cimgui.a", "cimgui.lib") and _find_static_lib(
+        out_dir, "libglfw3.a", "glfw3.lib", "libglfw3.lib"
+    ):
+        log(f"Using existing cimgui-go static libs for {name}")
+        CIMGUI_BUILD_OUTPUTS[(target["goos"], target["goarch"])] = {
+            "dir": out_dir,
+            "cflags": cimgui_go_flags(target),
+        }
+        return
+
+    module = cimgui_module_dir()
+    log(f"Building cimgui-go static libs for {name}...")
+    if target["goos"] == "windows":
+        env = windows_compiler_env(target)
+    else:
+        env = linux_compiler_env(target)
+    native = target["goarch"] == host_goarch()
+    cc = env.get("CC") or ("gcc" if target["goos"] != "windows" else "")
+    cxx = env.get("CXX") or ("g++" if target["goos"] != "windows" else "")
+    if not cc or not cxx:
+        log(
+            f"No C/C++ compiler available for the cimgui-go {name} build. "
+            "Install aarch64-w64-mingw32-gcc/g++ (or build natively on arm64).",
+            error=True,
+        )
+        sys.exit(1)
+
+    common = ["-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"]
+    if not native:
+        system = "Windows" if target["goos"] == "windows" else "Linux"
+        common += [f"-DCMAKE_SYSTEM_NAME={system}", "-DCMAKE_SYSTEM_PROCESSOR=aarch64"]
+    if target["goos"] != "windows":
+        shim = cimgui_include_shim()
+        common += [f"-DCMAKE_C_FLAGS=-isystem{shim}", f"-DCMAKE_CXX_FLAGS=-isystem{shim}"]
+    common += [f"-DCMAKE_C_COMPILER={cc}", f"-DCMAKE_CXX_COMPILER={cxx}"]
+    # Windows defaults to a multi-config generator (VS / Ninja Multi-Config), which
+    # places outputs in a per-config subdirectory and ignores CMAKE_BUILD_TYPE. Pin a
+    # single-config generator matching the compiler so outputs land at the build root.
+    if target["goos"] == "windows" and cxx:
+        cxx_name = cxx.lower()
+        if "clang" in cxx_name:
+            common += ["-G", "Ninja"]
+        elif "g++" in cxx_name:
+            common += ["-G", "MinGW Makefiles"]
+    # Windows ARM64: pin the aarch64 MSVC target so the static libs are aarch64 even if
+    # clang's default triple is x86_64 (a no-op on a native ARM64 clang).
+    arm64_target = windows_arm64_target_flags(target, cxx)
+    if arm64_target:
+        flags = " ".join(arm64_target)
+        common += [
+            f"-DCMAKE_C_FLAGS={flags}",
+            f"-DCMAKE_CXX_FLAGS={flags}",
+            f"-DCMAKE_EXE_LINKER_FLAGS={flags}",
+            f"-DCMAKE_SHARED_LINKER_FLAGS={flags}",
+        ]
+
+    # cimgui core (imgui + implot + imnodes + ImGuizmo + CTE + glfw/sdl2 backends).
+    # Static lib name is toolchain-dependent: cimgui.a (MinGW) vs cimgui.lib (MSVC/clang).
+    cimgui_build = PROJECT / ".build" / f"cimgui-core-{target['goos']}-{target['goarch']}"
+    run(["cmake", "-S", str(module / "lib"), "-B", str(cimgui_build)] + common, env=env)
+    run(["cmake", "--build", str(cimgui_build), "--config", "Release", "--parallel", str(CPU_THREADS)], env=env)
+    built_cimgui = _find_built_lib(cimgui_build, "cimgui.a", "cimgui.lib")
+    if built_cimgui is None:
+        log("cimgui-go build did not produce cimgui.a or cimgui.lib", error=True)
+        sys.exit(1)
+
+    # GLFW windowing backend (go links libglfw3.a on MinGW, glfw3.lib on MSVC/clang)
+    glfw_build = PROJECT / ".build" / f"glfw-{target['goos']}-{target['goarch']}"
+    glfw_flags = common + [
+        "-DGLFW_BUILD_EXAMPLES=off",
+        "-DGLFW_BUILD_TESTS=off",
+        "-DGLFW_BUILD_DOCS=off",
+        "-DBUILD_SHARED_LIBS=off",
+    ]
+    if target["goos"] != "windows":
+        glfw_flags += ["-DGLFW_BUILD_WAYLAND=off", "-DGLFW_BUILD_X11=on"]
+    run(
+        ["cmake", "-S", str(module / "thirdparty" / "glfw"), "-B", str(glfw_build)] + glfw_flags,
+        env=env,
+    )
+    run(["cmake", "--build", str(glfw_build), "--config", "Release", "--parallel", str(CPU_THREADS)], env=env)
+    built_glfw = _find_built_lib(glfw_build, "libglfw3.a", "glfw3.lib", "libglfw3.lib")
+    if built_glfw is None:
+        log("cimgui-go build did not produce libglfw3.a or glfw3.lib", error=True)
+        sys.exit(1)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(built_cimgui), str(out_dir / built_cimgui.name))
+    shutil.copy2(str(built_glfw), str(out_dir / built_glfw.name))
+    log(f"Built cimgui-go static libs for {name} in {out_dir} ({built_cimgui.name}, {built_glfw.name})")
+    CIMGUI_BUILD_OUTPUTS[(target["goos"], target["goarch"])] = {
+        "dir": out_dir,
+        "cflags": cimgui_go_flags(target),
+    }
+
+
+def build_cimgui(targets: list[dict]) -> None:
+    seen = set()
+    for target in targets:
+        if not cimgui_needs_build(target):
+            continue
+        key = (target["goos"], target["goarch"])
+        if key in seen:
+            continue
+        seen.add(key)
+        if not shutil.which("cmake"):
+            log("CMake is required to build the cimgui-go arm64 static libs", error=True)
+            sys.exit(1)
+        build_cimgui_target(target)
 
 
 def texconv_library(target: dict) -> Path:
@@ -629,31 +941,70 @@ def build_vulkan(targets: list[dict], skip: bool):
         if install_dir.exists():
             shutil.rmtree(install_dir)
         install_dir.mkdir(parents=True, exist_ok=True)
-        env = (
-            windows_compiler_env(target)
-            if target["platform"] == "windows"
-            else linux_compiler_env(target)
+        msvc_arm64 = (
+            target["platform"] == "windows" and target["goarch"] == "arm64"
         )
-        configure = [
-            "cmake",
-            "-S", str(VULKAN_SOURCE),
-            "-B", str(build_dir),
-            "-DCMAKE_BUILD_TYPE=Release",
-            f"-DCMAKE_INSTALL_PREFIX={install_dir}",
-        ]
+        if msvc_arm64:
+            # OpenEXR's internal_zip.c selects <arm64_neon.h> under _MSC_VER, whose
+            # NEON intrinsics resolve to MSVC-only neon_* helper symbols that clang
+            # cannot satisfy ("undefined symbol: neon_zip1_q8"). Build this
+            # self-contained aarch64 DLL with real MSVC -- the same toolchain Texconv
+            # already uses for arm64 -- so OpenEXR links. gdc_vulkan.dll is a C-ABI DLL
+            # loaded at runtime, so its MSVC ABI is independent of the clang-built
+            # Go executable. The Visual Studio generator finds cl.exe via vswhere.
+            env = {}
+            configure = [
+                "cmake",
+                "-S", str(VULKAN_SOURCE),
+                "-B", str(build_dir),
+                "-G", "Visual Studio 17 2022",
+                "-A", "ARM64",
+                "-DCMAKE_BUILD_TYPE=Release",
+                f"-DCMAKE_INSTALL_PREFIX={install_dir}",
+                "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+            ]
+        else:
+            env = (
+                windows_compiler_env(target)
+                if target["platform"] == "windows"
+                else linux_compiler_env(target)
+            )
+            configure = [
+                "cmake",
+                "-S", str(VULKAN_SOURCE),
+                "-B", str(build_dir),
+                "-DCMAKE_BUILD_TYPE=Release",
+                f"-DCMAKE_INSTALL_PREFIX={install_dir}",
+            ]
+            if env.get("CC"):
+                # Pin the C compiler explicitly. CMake's auto-detect on a Windows
+                # runner can resolve to the x86_64 MinGW (C:\mingw64); pinning keeps
+                # the toolchain consistent with the cimgui build.
+                configure.append(f"-DCMAKE_C_COMPILER={env['CC']}")
+            if env.get("CXX"):
+                configure.append(f"-DCMAKE_CXX_COMPILER={env['CXX']}")
+                compiler_name = Path(env["CXX"]).name.lower()
+                if target["platform"] == "windows" and "clang" in compiler_name:
+                    configure[1:1] = ["-G", "Ninja"]
+                elif "g++" in compiler_name:
+                    configure[1:1] = ["-G", "MinGW Makefiles"]
+            # Windows ARM64 (clang path only): pin the aarch64 MSVC target so the
+            # sources are aarch64 even if clang defaults to an x86_64 triple.
+            arm64_target = windows_arm64_target_flags(target, env.get("CXX", ""))
+            if arm64_target:
+                flags = " ".join(arm64_target)
+                configure += [
+                    f"-DCMAKE_C_FLAGS={flags}",
+                    f"-DCMAKE_CXX_FLAGS={flags}",
+                    f"-DCMAKE_EXE_LINKER_FLAGS={flags}",
+                    f"-DCMAKE_SHARED_LINKER_FLAGS={flags}",
+                ]
         if os.environ.get("VULKAN_SDK"):
             configure.append(f"-DCMAKE_PREFIX_PATH={os.environ['VULKAN_SDK']}")
         if os.environ.get("GDC_PRECOMPILED_SHADER_DIR"):
             configure.append(
                 f"-DGDC_PRECOMPILED_SHADER_DIR={os.environ['GDC_PRECOMPILED_SHADER_DIR']}"
             )
-        if env.get("CXX"):
-            configure.append(f"-DCMAKE_CXX_COMPILER={env['CXX']}")
-            compiler_name = Path(env["CXX"]).name.lower()
-            if target["platform"] == "windows" and "clang" in compiler_name:
-                configure[1:1] = ["-G", "Ninja"]
-            elif "g++" in compiler_name:
-                configure[1:1] = ["-G", "MinGW Makefiles"]
         run(configure, env=env)
         run(["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", str(CPU_THREADS)], env=env)
         run([
@@ -754,9 +1105,20 @@ def build_target(
     elif target["platform"] == "macos":
         env.update(darwin_compiler_env(target))
 
+    key = (target["goos"], target["goarch"])
+    if key in CIMGUI_BUILD_OUTPUTS:
+        env.update(CIMGUI_BUILD_OUTPUTS[key]["cflags"])
+
     if target["goarch"] == "arm64":
+        # Pin the aarch64 MSVC target on the cgo C objects (Windows/clang only) so they
+        # link into the aarch64 go runtime even if clang defaults to an x86_64 triple.
+        arm64_target = (
+            " ".join(windows_arm64_target_flags(target, env.get("CC", "")))
+            if target["platform"] == "windows"
+            else ""
+        )
         for flag_name in ("CGO_CFLAGS", "CGO_CXXFLAGS"):
-            env[flag_name] = f"{env.get(flag_name, '')} -fsigned-char".strip()
+            env[flag_name] = f"{env.get(flag_name, '')} -fsigned-char {arm64_target}".strip()
 
     binary.parent.mkdir(parents=True, exist_ok=True)
     tmp_binary = binary.parent / f".build_{name}{binary.suffix}"
@@ -923,6 +1285,7 @@ def main():
         p.error("no build targets selected")
 
     upx_enabled = not args.no_upx
+    build_cimgui(selected)
     build_texconv(selected, args.skip_texconv)
     build_vulkan(selected, args.skip_vulkan)
 
