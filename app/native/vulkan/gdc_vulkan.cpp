@@ -166,7 +166,7 @@ bool appleOSAtLeast(int major)
 {
     char version[64] = {};
     size_t size = sizeof(version);
-    if (sysctlbyname("kern.osproductversion", version, &size, nullptr, nullptr) != 0)
+    if (sysctlbyname("kern.osproductversion", version, &size, nullptr, 0) != 0)
         return false;
     return std::atoi(version) >= major;
 }
