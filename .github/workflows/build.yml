@@ -78,7 +78,8 @@ jobs:
                     - platform: macos
                       arch: arm64
                       os: macos-15
-                      vulkan: false
+                      vulkan: true
+                      precompiled_shaders: true
 
         steps:
             - name: Check out source
@@ -90,12 +91,6 @@ jobs:
               uses: actions/setup-python@v7
               with:
                   python-version: "3.13"
-
-            - name: Set up Go
-              uses: actions/setup-go@v7
-              with:
-                  go-version-file: go.mod
-                  cache: true
 
             - name: Install Linux dependencies
               if: runner.os == 'Linux'
@@ -114,7 +109,11 @@ jobs:
 
             - name: Install Windows dependencies
               if: runner.os == 'Windows'
-              run: choco install nasm upx -y
+              shell: bash
+              run: |
+                  choco install nasm -y
+                  echo 'C:\Program Files\NASM' >> "$GITHUB_PATH"
+                  choco install upx -y || echo "UPX is not available; the release binary will be left uncompressed"
 
             - name: Install Vulkan SDK
               if: matrix.vulkan
@@ -122,7 +121,7 @@ jobs:
               with:
                   vulkan_version: 1.4.357.0
                   cache: true
-                  stripdown: true
+                  stripdown: ${{ matrix.platform != 'macos' }}
                   github_token: ${{ secrets.GITHUB_TOKEN }}
 
             - name: Download precompiled shaders

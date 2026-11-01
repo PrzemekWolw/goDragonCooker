@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "" FORCE)
+endif()
 if(POLICY CMP0207)
     cmake_policy(SET CMP0207 NEW)
 endif()
@@ -101,6 +104,10 @@ add_custom_target(gdc_vulkan_shaders ALL DEPENDS ${SHADER_OUTPUTS})
 add_library(gdc_vulkan SHARED gdc_vulkan.cpp)
 if(WIN32)
     set_target_properties(gdc_vulkan PROPERTIES PREFIX "")
+elseif(APPLE)
+    set_target_properties(gdc_vulkan PROPERTIES
+        BUILD_RPATH "@loader_path"
+        INSTALL_RPATH "@loader_path")
 elseif(UNIX)
     set_target_properties(gdc_vulkan PROPERTIES
         BUILD_RPATH "$ORIGIN"
@@ -134,13 +141,20 @@ else()
 endif()
 
 get_filename_component(COMPILER_DIRECTORY "${CMAKE_CXX_COMPILER}" DIRECTORY)
+set(GDC_RUNTIME_DIRS "${COMPILER_DIRECTORY}")
+if(DEFINED ENV{VULKAN_SDK})
+    list(APPEND GDC_RUNTIME_DIRS
+        "$ENV{VULKAN_SDK}/lib"
+        "$ENV{VULKAN_SDK}/Lib"
+        "$ENV{VULKAN_SDK}/macOS/lib")
+endif()
 install(TARGETS gdc_vulkan
     RUNTIME_DEPENDENCY_SET gdc_vulkan_dependencies
     RUNTIME DESTINATION . COMPONENT gdc_vulkan_runtime
     LIBRARY DESTINATION . COMPONENT gdc_vulkan_runtime)
 set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME gdc_vulkan_runtime)
 install(RUNTIME_DEPENDENCY_SET gdc_vulkan_dependencies
-        DIRECTORIES "${COMPILER_DIRECTORY}"
+        DIRECTORIES ${GDC_RUNTIME_DIRS}
         PRE_EXCLUDE_REGEXES "api-ms-" "ext-ms-"
         POST_EXCLUDE_REGEXES
             ".*[Ss]ystem32/.*"
@@ -148,6 +162,8 @@ install(RUNTIME_DEPENDENCY_SET gdc_vulkan_dependencies
             ".*/libvulkan\\.so.*"
             ".*/ld-linux.*"
             ".*/lib(c|m|pthread|dl|rt)\\.so.*"
+            "/usr/lib/.*"
+            "/System/.*"
     RUNTIME DESTINATION .
     LIBRARY DESTINATION .)
 install(FILES ${SHADER_OUTPUTS}

@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -20,6 +21,11 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#include <sys/sysctl.h>
+#endif
 
 #include "stb_image.h"
 
@@ -127,8 +133,76 @@ bool check(VkResult result, const char* operation, std::string& error)
     return false;
 }
 
+#ifndef VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+#define VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR 0x00000001
+#endif
+
+bool extensionListed(const std::vector<VkExtensionProperties>& extensions, const char* name)
+{
+    for (const VkExtensionProperties& extension : extensions)
+        if (std::strcmp(extension.extensionName, name) == 0)
+            return true;
+    return false;
+}
+
+#if defined(__APPLE__)
+
+bool fileExists(const std::string& path)
+{
+    return std::ifstream(path, std::ios::binary).good();
+}
+
+std::string thisLibraryDirectory()
+{
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&fileExists), &info) == 0 || !info.dli_fname)
+        return {};
+    const std::string path = info.dli_fname;
+    const auto slash = path.find_last_of('/');
+    return slash == std::string::npos ? std::string() : path.substr(0, slash);
+}
+
+bool appleOSAtLeast(int major)
+{
+    char version[64] = {};
+    size_t size = sizeof(version);
+    if (sysctlbyname("kern.osproductversion", version, &size, nullptr, nullptr) != 0)
+        return false;
+    return std::atoi(version) >= major;
+}
+
+void selectAppleVulkanDriver()
+{
+    if (std::getenv("VK_DRIVER_FILES") || std::getenv("VK_ICD_FILENAMES"))
+        return;
+    const std::string directory = thisLibraryDirectory();
+    if (directory.empty())
+        return;
+    const std::string kosmic = directory + "/kosmickrisp_icd.json";
+    const std::string molten = directory + "/MoltenVK_icd.json";
+    std::string chosen;
+#if defined(__aarch64__)
+    if (appleOSAtLeast(26) && fileExists(kosmic))
+        chosen = kosmic;
+    else
+#endif
+    if (fileExists(molten))
+        chosen = molten;
+    else if (fileExists(kosmic))
+        chosen = kosmic;
+    if (chosen.empty())
+        return;
+    setenv("VK_DRIVER_FILES", chosen.c_str(), 0);
+    setenv("VK_ICD_FILENAMES", chosen.c_str(), 0);
+}
+
+#endif
+
 VkInstance createInstance(std::string& error)
 {
+#if defined(__APPLE__)
+    selectAppleVulkanDriver();
+#endif
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "goDragonCooker";
     app.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
@@ -136,8 +210,21 @@ VkInstance createInstance(std::string& error)
     app.engineVersion = VK_MAKE_VERSION(4, 5, 0);
     app.apiVersion = VK_API_VERSION_1_1;
 
+    uint32_t extensionCount = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
+    std::vector<VkExtensionProperties> extensions(extensionCount);
+    if (extensionCount)
+        vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, extensions.data());
+    const char* portabilityEnumeration = "VK_KHR_portability_enumeration";
+    const bool portability = extensionListed(extensions, portabilityEnumeration);
+
     VkInstanceCreateInfo info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     info.pApplicationInfo = &app;
+    if (portability) {
+        info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+        info.enabledExtensionCount = 1;
+        info.ppEnabledExtensionNames = &portabilityEnumeration;
+    }
     VkInstance instance = VK_NULL_HANDLE;
     if (!check(vkCreateInstance(&info, nullptr, &instance), "vkCreateInstance", error))
         return VK_NULL_HANDLE;
@@ -1467,9 +1554,22 @@ gdc_vulkan_context* gdc_vulkan_create(
         queueInfo.queueFamilyIndex = context.queueFamily;
         queueInfo.queueCount = 1;
         queueInfo.pQueuePriorities = &priority;
+        uint32_t extensionCount = 0;
+        vkEnumerateDeviceExtensionProperties(context.physicalDevice, nullptr, &extensionCount, nullptr);
+        std::vector<VkExtensionProperties> extensions(extensionCount);
+        if (extensionCount) {
+            vkEnumerateDeviceExtensionProperties(
+                context.physicalDevice, nullptr, &extensionCount, extensions.data());
+        }
+        const char* portabilitySubset = "VK_KHR_portability_subset";
+        const bool portability = extensionListed(extensions, portabilitySubset);
         VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         deviceInfo.queueCreateInfoCount = 1;
         deviceInfo.pQueueCreateInfos = &queueInfo;
+        if (portability) {
+            deviceInfo.enabledExtensionCount = 1;
+            deviceInfo.ppEnabledExtensionNames = &portabilitySubset;
+        }
         if (!check(vkCreateDevice(context.physicalDevice, &deviceInfo, nullptr, &context.device), "vkCreateDevice", message))
             goto failed;
         vkGetDeviceQueue(context.device, context.queueFamily, 0, &context.queue);
