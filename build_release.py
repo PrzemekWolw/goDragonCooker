@@ -859,7 +859,7 @@ def build_vulkan(targets: list[dict], skip: bool):
                 compiler_name = Path(env["CXX"]).name.lower()
                 if target["platform"] == "windows" and "clang" in compiler_name:
                     configure[1:1] = ["-G", "Ninja"]
-                elif "g++" in compiler_name:
+                elif target["platform"] == "windows" and "g++" in compiler_name:
                     configure[1:1] = ["-G", "MinGW Makefiles"]
         if os.environ.get("VULKAN_SDK"):
             configure.append(f"-DCMAKE_PREFIX_PATH={os.environ['VULKAN_SDK']}")
