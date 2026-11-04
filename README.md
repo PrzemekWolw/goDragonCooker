@@ -40,15 +40,7 @@ BMP, TGA, HDR, TIFF, and EXR sources.
 
 - Windows x64 and ARM64: Compressonator Vulkan and Texconv.
 - Linux x64 and ARM64: Compressonator Vulkan and Texconv.
-- macOS x64 and ARM64: Compressonator Vulkan and Texconv, built on macOS with the Apple SDK. The release archive includes the Vulkan loader, MoltenVK, and KosmicKrisp when the SDK provides it. MoltenVK runs on macOS 11+ (Intel and Apple Silicon). KosmicKrisp is used on macOS 26+ Apple Silicon.
-
-GitHub Actions builds the Windows and Linux x64 and ARM64 release archives,
-plus macOS ARM64 (`.github/workflows/build.yml`). The app is C++ with GLFW, so
-every architecture, including Windows ARM64 and macOS ARM64, builds with the
-platform C++ compiler. Windows uses the Visual Studio installed on the runner
-(2026 on the current GitHub images, 2022 where that is what is installed) and
-can cross-compile ARM64 from an x64 host that has the ARM64 toolset. macOS
-ARM64 requires macOS 11 or newer.
+- macOS x64 and ARM64: Compressonator Vulkan via MoltenVK or KosmicKrisp and Texconv.
 
 See [BUILD.md](BUILD.md) for build instructions.
 
@@ -63,12 +55,7 @@ next to the executable:
 
 The Compressonator backend requires a Vulkan 1.1 loader and a compute-capable
 Vulkan driver. Use the GPU selector in the Texture Cooker to choose a physical
-device or let the application select the best available device. On Windows and
-Linux the GPU driver installs the loader (`vulkan-1.dll` or `libvulkan.so.1`).
-The macOS archive ships that loader itself, plus MoltenVK and KosmicKrisp.
-Apple Silicon on macOS 26 or newer uses KosmicKrisp when that driver is in the
-archive; every other Mac uses MoltenVK. Other native dependencies are included
-in the release archive.
+device or let the application select the best available device.
 
 For development, first initialize the native backends with
 `git submodule update --init --recursive`. On Linux, `build_release.py` also
