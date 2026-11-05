@@ -4,6 +4,7 @@
 #include <chrono>
 #include <thread>
 
+#include "core/i18n.h"
 #include "core/platform.h"
 #include "core/settings.h"
 #include "core/strings.h"
@@ -66,7 +67,7 @@ CookCheck checkCook(const CookJob& job, const CookValidation& v, bool firstWasTe
 void runCooker(std::string directory, bool autoDetectFmt, CookValidation validation)
 {
     TaskState& tab = cookTab.task;
-    tab.begin("Seeking files...");
+    tab.begin(tr("gdc.cook.seekingFiles"));
     std::string backend;
     int vulkanDevice;
     {
@@ -75,15 +76,15 @@ void runCooker(std::string directory, bool autoDetectFmt, CookValidation validat
         vulkanDevice = app.vulkanDevice;
     }
 
-    tab.log("Starting processing");
-    tab.log("Seeking files");
+    tab.log(tr("gdc.cook.startingProcessing"));
+    tab.log(tr("gdc.cook.seekingFiles"));
 
     std::vector<CookJob> jobs;
     std::error_code ec;
     const fs::path root = u8path(directory);
     if (!fs::is_directory(root, ec)) {
-        tab.log("Walk error: cannot read " + directory);
-        tab.finish("Error");
+        tab.log(format(tr("gdc.common.walkErrorCannotRead"), directory.c_str()));
+        tab.finish(tr("gdc.common.error"));
         return;
     }
     for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
@@ -105,7 +106,7 @@ void runCooker(std::string directory, bool autoDetectFmt, CookValidation validat
             continue;
         }
         if (img.bits != 0 && img.bits != 8 && !isFloatHDR(name)) {
-            tab.log(format("  SKIP: %s (not 8-bit, got %d-bit)", name.c_str(), img.bits));
+            tab.log(format(tr("gdc.cook.skipNot8BitGot"), name.c_str(), img.bits));
             continue;
         }
 
@@ -117,18 +118,18 @@ void runCooker(std::string directory, bool autoDetectFmt, CookValidation validat
             continue;
         }
         jobs.push_back(job);
-        tab.log(format("  Queue: %s (%s, %s)", name.c_str(), job.format.c_str(), colorSpaceName(img.colorSpace)));
+        tab.log(format(tr("gdc.cook.queue"), name.c_str(), job.format.c_str(), colorSpaceName(img.colorSpace)));
     }
     if (ec) {
-        tab.log("Walk error: " + ec.message());
-        tab.finish("Error");
+        tab.log(format(tr("gdc.cook.walkError"), ec.message().c_str()));
+        tab.finish(tr("gdc.common.error"));
         return;
     }
 
     const size_t total = jobs.size();
     if (total == 0) {
-        tab.log("No files to cook.");
-        tab.finish("Nothing to do");
+        tab.log(tr("gdc.cook.noFilesToCook"));
+        tab.finish(tr("gdc.common.nothingToDo"));
         return;
     }
 
@@ -137,7 +138,7 @@ void runCooker(std::string directory, bool autoDetectFmt, CookValidation validat
         (isExpensiveCodec(job.format) ? codecJobs : cpuJobs).push_back(job);
     }
 
-    tab.setStatus("Cooking textures...");
+    tab.setStatus(tr("gdc.cook.cookingTextures"));
 
     const auto t0 = std::chrono::steady_clock::now();
     size_t done = 0, cooked = 0, failed = 0, batchCount = 0;
@@ -174,14 +175,14 @@ void runCooker(std::string directory, bool autoDetectFmt, CookValidation validat
             }
         }
         if (++batchCount >= 16 || done == total) {
-            tab.setStatus(format("Cooking: %zu/%zu (%zu cooked, %zu failed)", done, total, cooked, failed));
+            tab.setStatus(format(tr("gdc.cook.cookingCookedFailed"), done, total, cooked, failed));
             batchCount = 0;
         }
     };
 
     if (backend == textureBackendCompressonator) {
         const unsigned workers = std::min<unsigned>(vulkanPipelineWorkerCount, unsigned(total));
-        tab.log(format("Cooking %zu files with Compressonator Vulkan (%u GPU workers, %u pipeline workers).", total,
+        tab.log(format(tr("gdc.cook.cookingFilesWithCompressonatorVulkan"), total,
                        vulkanWorkerCount, workers));
         runPool(
             jobs.size(), workers, tab,
@@ -194,14 +195,14 @@ void runCooker(std::string directory, bool autoDetectFmt, CookValidation validat
             },
             [&](size_t i, const std::string& error) { recordResult(baseName(jobs[i].srcFile), error, checks[i]); });
     } else {
-        tab.log(format("Cooking %zu files: %zu BC6H/BC7 first, then %zu CPU-batch", total, codecJobs.size(),
+        tab.log(format(tr("gdc.cook.cookingFilesBc6hBc7First"), total, codecJobs.size(),
                        cpuJobs.size()));
 
         bool useCPUCodec = false;
         for (const CookJob& job : codecJobs) {
             if (tab.stop) {
-                tab.log("Cooking cancelled.");
-                tab.finish("Cancelled");
+                tab.log(tr("gdc.cook.cookingCancelled"));
+                tab.finish(tr("gdc.common.cancelled"));
                 return;
             }
             const std::vector<std::string> args = cookArgs(job, preferredGPUArgs());
@@ -213,7 +214,7 @@ void runCooker(std::string directory, bool autoDetectFmt, CookValidation validat
                 const std::string fallbackError = texconvRun(args, true);
                 if (fallbackError.empty()) {
                     error.clear();
-                    tab.log(format("  GPU codec failed for %s; using CPU codec for remaining BC6H/BC7 textures.",
+                    tab.log(format(tr("gdc.cook.gpuCodecFailedForUsing"),
                                    baseName(job.srcFile).c_str()));
                 } else {
                     error += "; CPU fallback: " + fallbackError;
@@ -226,7 +227,7 @@ void runCooker(std::string directory, bool autoDetectFmt, CookValidation validat
         if (!cpuJobs.empty()) {
             const unsigned workers =
                 std::max(1u, std::min<unsigned>(std::thread::hardware_concurrency(), unsigned(cpuJobs.size())));
-            tab.log(format("Running %zu CPU-batch textures with %u workers.", cpuJobs.size(), workers));
+            tab.log(format(tr("gdc.cook.runningCpuBatchTexturesWith"), cpuJobs.size(), workers));
             std::vector<CookCheck> cpuChecks(cpuJobs.size());
             runPool(
                 cpuJobs.size(), workers, tab,
@@ -244,21 +245,21 @@ void runCooker(std::string directory, bool autoDetectFmt, CookValidation validat
     }
 
     if (tab.stop) {
-        tab.log("Cooking cancelled.");
-        tab.finish("Cancelled");
+        tab.log(tr("gdc.cook.cookingCancelled"));
+        tab.finish(tr("gdc.common.cancelled"));
         return;
     }
 
     const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    tab.log(format("Finished in %.2fs (%zu/%zu textures cooked, %zu failed)", elapsed, cooked, total, failed));
+    tab.log(format(tr("gdc.cook.finishedInSTexturesCooked"), elapsed, cooked, total, failed));
     if (validation.validate) {
-        tab.log(format("Validation: %zu validated, %zu passed, %zu warned, %zu failed, %zu header only", validated,
+        tab.log(format(tr("gdc.cook.validationValidatedPassedWarnedFailed"), validated,
                        passed, warned, qualityFailed, headerOnly));
         if (validation.retry) {
-            tab.log(format("Retry: %zu retried, %zu improved, %zu kept original", retried, improved, keptOriginal));
+            tab.log(format(tr("gdc.cook.retryRetriedImprovedKeptOriginal"), retried, improved, keptOriginal));
         }
     }
-    tab.finish(format("Done: %zu/%zu cooked", cooked, total));
+    tab.finish(format(tr("gdc.cook.doneCooked"), cooked, total));
 }
 
 void gpuControlsUI()
@@ -280,7 +281,7 @@ void gpuControlsUI()
 
     static const std::vector<std::string> backendOptions = {"Compressonator (Vulkan GPU)", "Texconv"};
     int backendIndex = backend == textureBackendTexconv ? 1 : 0;
-    ImGui::TextUnformatted("Texture backend:");
+    ImGui::TextUnformatted(tr("gdc.cook.textureBackend"));
     ImGui::SameLine();
     if (comboStrings("##texture_backend", &backendIndex, backendOptions, px(320))) {
         {
@@ -291,7 +292,7 @@ void gpuControlsUI()
     }
 
     if (backend == textureBackendCompressonator) {
-        std::vector<std::string> vulkanOptions = {"Automatic (best)"};
+        std::vector<std::string> vulkanOptions = {"gdc.common.automaticBest"};
         for (size_t index = 0; index < vulkanDevices.size(); ++index) {
             vulkanOptions.push_back(format("%zu: %s", index, vulkanDevices[index].c_str()));
         }
@@ -299,7 +300,7 @@ void gpuControlsUI()
         if (vulkanIndex < 0 || vulkanIndex >= int(vulkanOptions.size())) {
             vulkanIndex = 0;
         }
-        ImGui::TextUnformatted("Compressonator GPU:");
+        ImGui::TextUnformatted(tr("gdc.cook.compressonatorGpu"));
         ImGui::SameLine();
         if (comboStrings("##compressonator_gpu", &vulkanIndex, vulkanOptions, px(320))) {
             {
@@ -316,7 +317,7 @@ void gpuControlsUI()
         if (comboIndex < 0 || comboIndex >= int(options.size())) {
             comboIndex = 0;
         }
-        ImGui::TextUnformatted("Texconv GPU:");
+        ImGui::TextUnformatted(tr("gdc.cook.texconvGpu"));
         ImGui::SameLine();
         if (comboStrings("##texconv_gpu", &comboIndex, options, px(320))) {
             {
@@ -328,12 +329,12 @@ void gpuControlsUI()
         }
         if (checking) {
             ImGui::SameLine();
-            ImGui::TextUnformatted("Testing...");
+            ImGui::TextUnformatted(tr("gdc.cook.testing"));
         }
 #else
         (void)configuredGPU;
         if (checking) {
-            ImGui::TextUnformatted("Checking hardware...");
+            ImGui::TextUnformatted(tr("gdc.cook.checkingHardware"));
         }
 #endif
     }
@@ -342,9 +343,9 @@ void gpuControlsUI()
         return;
     }
     ImGui::PushStyleColor(ImGuiCol_Text, colTextDim);
-    ImGui::TextUnformatted("System:");
+    ImGui::TextUnformatted(tr("gdc.cook.system"));
     for (const std::string& line : report) {
-        ImGui::TextUnformatted(line.c_str());
+        ImGui::TextUnformatted(tr(line));
     }
     ImGui::PopStyleColor();
 }
@@ -399,25 +400,24 @@ void cookTabInit()
 
 static void validationControlsUI(CookValidation& v)
 {
-    bool changed = ImGui::Checkbox("Validate after cook", &v.validate);
-    tooltip("Decodes each DDS and compares it with the source: PSNR, max error, SSIM on luma and a per-block check.");
+    bool changed = ImGui::Checkbox(trId("gdc.cook.validateAfterCook", "cook_validate").c_str(), &v.validate);
+    tooltip("gdc.cook.validateAfterCook.tooltip");
     ImGui::BeginDisabled(!v.validate);
     ImGui::Indent();
-    changed |= ImGui::Checkbox("Retry with texconv when quality is low", &v.retry);
-    tooltip("Re-cooks below-target files with texconv into a temporary folder and keeps the retry only if it is at "
-            "least 0.5 dB better.");
-    if (ImGui::TreeNode("Quality targets (PSNR, dB)")) {
+    changed |= ImGui::Checkbox(trId("gdc.cook.retryWithTexconvWhenQuality", "cook_retry").c_str(), &v.retry);
+    tooltip("gdc.cook.retryWithTexconvWhenQuality.tooltip");
+    if (ImGui::TreeNode(trId("gdc.cook.qualityTargetsPsnrDb", "cook_targets").c_str())) {
         auto target = [&](const char* label, double* value) {
             ImGui::SetNextItemWidth(px(140));
-            if (ImGui::InputDouble(label, value, 0.5, 1.0, "%.1f")) {
+            if (ImGui::InputDouble(trId(label, label).c_str(), value, 0.5, 1.0, "%.1f")) {
                 *value = std::clamp(*value, 10.0, 80.0);
                 changed = true;
             }
         };
-        target("BC7 color/data", &v.thresholds.bc7);
-        target("BC5 normal", &v.thresholds.bc5);
-        target("BC4 data", &v.thresholds.bc4);
-        ImGui::TextColored(colTextDim, "Below target warns (and retries); %.0f dB lower fails.",
+        target("gdc.cook.bc7ColorData", &v.thresholds.bc7);
+        target("gdc.cook.bc5Normal", &v.thresholds.bc5);
+        target("gdc.cook.bc4Data", &v.thresholds.bc4);
+        ImGui::TextColored(colTextDim, tr("gdc.cook.belowTargetWarnsAndRetries"),
                            v.thresholds.floorMargin);
         ImGui::TreePop();
     }
@@ -430,20 +430,20 @@ static void validationControlsUI(CookValidation& v)
 
 void cookTabUI()
 {
-    if (!ImGui::BeginTabItem("Texture Cooker")) {
+    if (!ImGui::BeginTabItem(trId("gdc.cook.textureCooker", "tab_cook").c_str())) {
         return;
     }
     CookTab& c = cookTab;
-    ImGui::TextUnformatted("Textures directory:");
+    ImGui::TextUnformatted(tr("gdc.common.texturesDirectory"));
     ImGui::InputText("##cook_directory", &c.directory);
     ImGui::SameLine();
-    if (ImGui::Button("Browse")) {
+    if (ImGui::Button(trId("gdc.common.browse", "cook_browse").c_str())) {
         openDirPicker(&c.directory);
     }
 
     ImGui::Separator();
-    ImGui::Checkbox("Assume .data textures are grayscale (BC4)", &c.autoDetectFmt);
-    tooltip("Data textures will be cooked as grayscale to reduce memory usage regardless of input format mode.");
+    ImGui::Checkbox(trId("gdc.cook.assumeDataTexturesAreGrayscale", "cook_auto_fmt").c_str(), &c.autoDetectFmt);
+    tooltip("gdc.cook.assumeDataTexturesAreGrayscale.tooltip");
     validationControlsUI(c.validation);
     ImGui::Separator();
 
@@ -457,17 +457,17 @@ void cookTabUI()
         logLines = c.task.logLines;
     }
     if (running) {
-        if (ImGui::Button("Stop Cooker")) {
+        if (ImGui::Button(trId("gdc.cook.stopCooker", "cook_run").c_str())) {
             c.task.stop = true;
         }
-    } else if (ImGui::Button("Run Texture Cooker") && !c.directory.empty()) {
+    } else if (ImGui::Button(trId("gdc.cook.runTextureCooker", "cook_run").c_str()) && !c.directory.empty()) {
         c.task.log("");
         std::thread(runCooker, c.directory, c.autoDetectFmt, c.validation).detach();
     }
-    ImGui::Text("Status: %s", status.empty() ? "Waiting..." : status.c_str());
+    ImGui::Text(tr("gdc.common.status"), status.empty() ? tr("gdc.common.waiting") : status.c_str());
 
     ImGui::Separator();
-    ImGui::TextUnformatted("Output:");
+    ImGui::TextUnformatted(tr("gdc.common.output"));
     logView("##cook_log", logLines, 280, cookLogColor);
 
     gpuControlsUI();

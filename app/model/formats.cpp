@@ -9,6 +9,7 @@
 #include <assimp/Importer.hpp>
 #include <assimp/importerdesc.h>
 
+#include "core/i18n.h"
 #include "core/platform.h"
 #include "core/strings.h"
 #include "model/ts/ts_io.h"
@@ -69,30 +70,27 @@ SettingDef choiceSetting(const char* key, const char* label, std::vector<std::st
 // Settings for building a TSShape from an Assimp scene (used by both TS targets).
 void addTsImportSettings(std::vector<SettingDef>& s)
 {
-    s.push_back(choiceSetting("lod", "LOD detection", {"Auto", "Trailing number", "Single detail"}, 0,
-                              "Auto: trailing-number LODs (body200, Collision-1) when the scene has base*/start* nodes,\n"
-                              "otherwise every mesh node is one object at a single detail size."));
-    SettingDef size = intSetting("detailSize", "Single detail size", 1, 100000, 2);
+    s.push_back(choiceSetting("lod", "gdc.format.lod.label", {"gdc.format.choice.auto", "gdc.format.lod.choice.trailingNumber", "gdc.format.lod.choice.singleDetail"}, 0,
+                              "gdc.format.lod.tooltip"));
+    SettingDef size = intSetting("detailSize", "gdc.format.detailSize.label", 1, 100000, 2);
     size.visible = whenEq("lod", 2);
     s.push_back(size);
-    s.push_back(choiceSetting("scale", "Animated scale", {"Auto", "Uniform", "Aligned", "Arbitrary"}, 0,
-                              "How scale keyframes are stored. Auto picks uniform or aligned per sequence."));
-    s.push_back(choiceSetting("exporter", "Exporter id", {"Collada (124)", "Assimp (233)"}, 0,
-                              "Stored in the version word. The game uses a cached .cdae next to a .dae only when it is 124\n"
-                              "(or the .dae is missing); 233 marks an Assimp import cache."));
+    s.push_back(choiceSetting("scale", "gdc.format.scale.label", {"gdc.format.choice.auto", "gdc.format.scale.choice.uniform", "gdc.format.scale.choice.aligned", "gdc.format.scale.choice.arbitrary"}, 0,
+                              "gdc.format.scale.tooltip"));
+    s.push_back(choiceSetting("exporter", "gdc.format.exporter.label", {"gdc.format.exporter.choice.collada", "gdc.format.exporter.choice.assimp"}, 0,
+                              "gdc.format.exporter.tooltip"));
 }
 
 void addSharedAssimpSettings(std::vector<SettingDef>& s, bool pointClouds)
 {
-    s.push_back(boolSetting("lodNames", "Export LODs and collision", true,
-                            "From DTS/CDAE: every detail level becomes a node named <object><size> (body200, Colmesh-1)\n"
-                            "under base01/start01, so importing it back restores the LODs. Off: highest visible detail only."));
-    SettingDef col = boolSetting("collision", "Include collision meshes", true);
+    s.push_back(boolSetting("lodNames", "gdc.format.lodNames.label", true,
+                            "gdc.format.lodNames.tooltip"));
+    SettingDef col = boolSetting("collision", "gdc.format.collision.label", true);
     col.visible = whenTrue("lodNames");
     s.push_back(col);
-    s.push_back(boolSetting("animations", "Export animations", true));
+    s.push_back(boolSetting("animations", "gdc.format.animations.label", true));
     if (pointClouds) {
-        s.push_back(boolSetting("pointClouds", "Export point clouds", false, "Write meshes without faces as point clouds."));
+        s.push_back(boolSetting("pointClouds", "gdc.format.pointClouds.label", false, "gdc.format.pointClouds.tooltip"));
     }
 }
 
@@ -114,9 +112,9 @@ struct Registry {
         cdae.exts = {".cdae"};
         cdae.canRead = cdae.canWrite = cdae.isTs = true;
         cdae.caps = {true, true, true, true, true, true, true, true, true, true, true};
-        cdae.settings.push_back(choiceSetting("compression", "Compression", {"Auto (> 512 KB)", "On", "Off"}, 0,
-                                              "zstd-compress the body. Auto compresses bodies larger than 512 KB."));
-        SettingDef level = intSetting("zstdLevel", "zstd level", 1, 19, 3);
+        cdae.settings.push_back(choiceSetting("compression", "gdc.format.compression.label", {"gdc.format.compression.choice.auto", "gdc.format.choice.on", "gdc.format.choice.off"}, 0,
+                                              "gdc.format.compression.tooltip"));
+        SettingDef level = intSetting("zstdLevel", "gdc.format.zstdLevel.label", 1, 19, 3);
         level.visible = whenNe("compression", 2);
         cdae.settings.push_back(level);
         addTsImportSettings(cdae.settings);
@@ -133,11 +131,10 @@ struct Registry {
         std::vector<std::string> versions;
         for (int v = ts::kMaxDtsWriteVersion; v >= ts::kMinDtsWriteVersion; --v) {
             // No real v27/v28 sample exists to check these layouts against.
-            versions.push_back(format(v == 27 || v == 28 ? "v%d (unverified)" : "v%d", v));
+            versions.push_back(v == 27 || v == 28 ? "gdc.format.dtsVersion.v" + std::to_string(v) : format("v%d", v));
         }
-        SettingDef version = choiceSetting("version", "DTS version", versions, 0,
-                                           "v29: current. v28 drops the object-name header. v27/26 also drop tangents.\n"
-                                           "v25/24 also drop UV2 and vertex colors and need 16-bit indices.");
+        SettingDef version = choiceSetting("version", "gdc.format.dtsVersion.label", versions, 0,
+                                           "gdc.format.dtsVersion.tooltip");
         dts.settings.push_back(version);
         addTsImportSettings(dts.settings);
         dts.exporterId = [](const nlohmann::json&) { return std::string(); };
@@ -181,26 +178,36 @@ struct Registry {
             f.label = "glTF 2.0 (.glb / .gltf)";
             f.exts = {".glb", ".gltf"};
             f.caps.uv2 = f.caps.colors = f.caps.tangents = f.caps.skins = f.caps.animations = f.caps.morphs = true;
-            f.settings.push_back(choiceSetting("container", "Container", {"Binary (.glb)", "JSON + .bin (.gltf)"}, 0));
-            f.settings.push_back(boolSetting("unlimitedBones", "Unlimited bones per vertex", true,
-                                             "Write JOINTS_1.. sets instead of keeping only the 4 largest weights."));
-            f.settings.push_back(boolSetting("specGloss", "Specular-glossiness materials", false,
-                                             "KHR_materials_pbrSpecularGlossiness instead of metal-rough."));
-            f.settings.push_back(boolSetting("draco", "Draco mesh compression", false,
-                                             "KHR_draco_mesh_compression. The game's Assimp reads it. Joints and weights stay lossless;\n"
-                                             "points, lines and morph targets stay uncompressed."));
+            f.settings.push_back(choiceSetting("container", "gdc.format.container.label", {"gdc.format.container.choice.glb", "gdc.format.container.choice.gltf"}, 0));
+            f.settings.push_back(boolSetting("unlimitedBones", "gdc.format.unlimitedBones.label", true,
+                                             "gdc.format.unlimitedBones.tooltip"));
+            f.settings.push_back(boolSetting("specGloss", "gdc.format.specGloss.label", false,
+                                             "gdc.format.specGloss.tooltip"));
+            f.settings.push_back(boolSetting("draco", "gdc.format.draco.label", false,
+                                             "gdc.format.draco.tooltip"));
             auto dracoOn = whenTrue("draco");
-            SettingDef level = intSetting("dracoLevel", "Draco level", 0, 10, 7, "Higher is smaller and slower to encode.");
+            SettingDef level = intSetting("dracoLevel", "gdc.format.dracoLevel.label", 0, 10, 7,
+                                          "gdc.format.dracoLevel.tooltip");
             level.visible = dracoOn;
             f.settings.push_back(level);
             const struct {
                 const char* key;
                 const char* label;
                 int def;
-            } bits[] = {{"qPos", "Position bits", 14}, {"qNormal", "Normal bits", 10}, {"qUv", "UV bits", 12},
-                        {"qColor", "Color bits", 8},   {"qGeneric", "Generic bits", 12}};
+                const char* tip;
+            } bits[] = {
+                {"qPos", "gdc.format.qPos.label", 14,
+                 "gdc.format.qPos.tooltip"},
+                {"qNormal", "gdc.format.qNormal.label", 10,
+                 "gdc.format.qNormal.tooltip"},
+                {"qUv", "gdc.format.qUv.label", 12,
+                 "gdc.format.qUv.tooltip"},
+                {"qColor", "gdc.format.qColor.label", 8,
+                 "gdc.format.qColor.tooltip"},
+                {"qGeneric", "gdc.format.qGeneric.label", 12,
+                 "gdc.format.qGeneric.tooltip"}};
             for (const auto& b : bits) {
-                SettingDef q = intSetting(b.key, b.label, 1, 30, b.def, "Quantization bits; position error is about bbox / 2^bits.");
+                SettingDef q = intSetting(b.key, b.label, 1, 30, b.def, b.tip);
                 q.visible = dracoOn;
                 f.settings.push_back(q);
             }
@@ -214,7 +221,7 @@ struct Registry {
             f.id = "gltf1";
             f.label = "glTF 1.0 (.glb / .gltf)";
             f.exts = {".glb", ".gltf"};
-            f.settings.push_back(choiceSetting("container", "Container", {"Binary (.glb)", "JSON + .bin (.gltf)"}, 0));
+            f.settings.push_back(choiceSetting("container", "gdc.format.container.label", {"gdc.format.container.choice.glb", "gdc.format.container.choice.gltf"}, 0));
             addSharedAssimpSettings(f.settings, false);
             f.exporterId = [](const nlohmann::json& v) { return std::string(v.value("container", 0) == 1 ? "gltf" : "glb"); };
             f.outputExt = [](const nlohmann::json& v) { return std::string(v.value("container", 0) == 1 ? ".gltf" : ".glb"); };
@@ -226,9 +233,9 @@ struct Registry {
             f.label = "Autodesk FBX (.fbx)";
             f.exts = {".fbx"};
             f.caps.uv2 = f.caps.colors = f.caps.skins = f.caps.animations = true;
-            f.settings.push_back(choiceSetting("container", "Encoding", {"Binary", "ASCII"}, 0));
-            f.settings.push_back(boolSetting("transparencyFactor", "Transparency factor refers to opacity", false,
-                                             "Write TransparencyFactor as opacity (some tools read it that way)."));
+            f.settings.push_back(choiceSetting("container", "gdc.format.encoding.label", {"gdc.format.encoding.choice.binary", "gdc.format.encoding.choice.ascii"}, 0));
+            f.settings.push_back(boolSetting("transparencyFactor", "gdc.format.transparencyFactor.label", false,
+                                             "gdc.format.transparencyFactor.tooltip"));
             addSharedAssimpSettings(f.settings, false);
             f.exporterId = [](const nlohmann::json& v) { return std::string(v.value("container", 0) == 1 ? "fbxa" : "fbx"); };
             f.outputExt = [](const nlohmann::json&) { return std::string(".fbx"); };
@@ -240,7 +247,7 @@ struct Registry {
             f.label = "Wavefront OBJ (.obj)";
             f.exts = {".obj"};
             f.caps.hierarchy = false;
-            f.settings.push_back(boolSetting("mtl", "Write .mtl material file", true));
+            f.settings.push_back(boolSetting("mtl", "gdc.format.mtl.label", true));
             addSharedAssimpSettings(f.settings, true);
             f.exporterId = [](const nlohmann::json& v) { return std::string(v.value("mtl", 1) ? "obj" : "objnomtl"); };
             f.outputExt = [](const nlohmann::json&) { return std::string(".obj"); };
@@ -252,7 +259,7 @@ struct Registry {
             f.label = "Stereolithography (.stl)";
             f.exts = {".stl"};
             f.caps = {false, false, false, false, false, false, false, false, false, false, false};
-            f.settings.push_back(choiceSetting("container", "Encoding", {"Binary", "ASCII"}, 0));
+            f.settings.push_back(choiceSetting("container", "gdc.format.encoding.label", {"gdc.format.encoding.choice.binary", "gdc.format.encoding.choice.ascii"}, 0));
             addSharedAssimpSettings(f.settings, true);
             f.exporterId = [](const nlohmann::json& v) { return std::string(v.value("container", 0) == 1 ? "stl" : "stlb"); };
             f.outputExt = [](const nlohmann::json&) { return std::string(".stl"); };
@@ -265,7 +272,7 @@ struct Registry {
             f.exts = {".ply"};
             f.caps.hierarchy = f.caps.materials = false;
             f.caps.colors = true;
-            f.settings.push_back(choiceSetting("container", "Encoding", {"Binary", "ASCII"}, 0));
+            f.settings.push_back(choiceSetting("container", "gdc.format.encoding.label", {"gdc.format.encoding.choice.binary", "gdc.format.encoding.choice.ascii"}, 0));
             addSharedAssimpSettings(f.settings, true);
             f.exporterId = [](const nlohmann::json& v) { return std::string(v.value("container", 0) == 1 ? "ply" : "plyb"); };
             f.outputExt = [](const nlohmann::json&) { return std::string(".ply"); };
@@ -277,7 +284,7 @@ struct Registry {
             f.label = "DirectX X (.x)";
             f.exts = {".x"};
             f.caps.colors = true;
-            f.settings.push_back(boolSetting("x64", "64-bit floats", false));
+            f.settings.push_back(boolSetting("x64", "gdc.format.x64.label", false));
             addSharedAssimpSettings(f.settings, true);
             f.exporterId = [](const nlohmann::json&) { return std::string("x"); };
             f.outputExt = [](const nlohmann::json&) { return std::string(".x"); };
@@ -326,7 +333,13 @@ struct Registry {
             std::istringstream exts(d->mFileExtensions);
             std::string e;
             while (exts >> e) {
-                f.exts.push_back("." + toLower(e));
+                // Assimp's Terragen reader would claim BeamNG's own .ter terrain files, which are not Terragen.
+                if (toLower(e) != "ter") {
+                    f.exts.push_back("." + toLower(e));
+                }
+            }
+            if (f.exts.empty()) {
+                continue;
             }
             f.canRead = true;
             list.push_back(std::move(f));
@@ -430,13 +443,13 @@ std::string describeSettings(const Format& f, const nlohmann::json& values)
             text = std::to_string(value);
             break;
         case SettingType::Choice:
-            text = value >= 0 && value < int(s.choices.size()) ? s.choices[value] : std::to_string(value);
+            text = value >= 0 && value < int(s.choices.size()) ? tr(s.choices[value]) : std::to_string(value);
             break;
         }
         if (!out.empty()) {
             out += ", ";
         }
-        out += s.label + " " + text;
+        out += std::string(tr(s.label)) + " " + text;
     }
     return out.empty() ? "no extra settings" : out;
 }

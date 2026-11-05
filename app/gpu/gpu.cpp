@@ -104,7 +104,7 @@ std::vector<std::string> platformGPUInfo()
         report.push_back(format("GPU adapter %d: %s", adapter.index, adapter.name.c_str()));
     }
     if (adapters.empty()) {
-        report.push_back("GPU hardware: no display adapters reported");
+        report.push_back("gdc.gpu.noAdapters");
     }
     return report;
 }
@@ -124,7 +124,7 @@ std::string gpuAdapterName(int index)
 
 std::vector<std::string> gpuAdapterOptions()
 {
-    std::vector<std::string> options = {"Automatic (best)"};
+    std::vector<std::string> options = {"gdc.common.automaticBest"};
     for (const GpuAdapter& adapter : availableGPUAdapters()) {
         options.push_back(format("%d: %s", adapter.index, adapter.name.c_str()));
     }
@@ -246,13 +246,13 @@ std::vector<std::string> platformGPUInfo()
         report.push_back(format("GPU: driver %s, PCI %s", driver.c_str(), pciID.c_str()));
     }
     if (files.empty()) {
-        report.push_back("GPU hardware: no display adapters reported");
+        report.push_back("gdc.gpu.noAdapters");
     }
     return report;
 }
 
 std::vector<std::string> preferredGPUArgs() { return {}; }
-std::vector<std::string> gpuAdapterOptions() { return {"Automatic (best)"}; }
+std::vector<std::string> gpuAdapterOptions() { return {"gdc.common.automaticBest"}; }
 int gpuAdapterOptionIndex(int) { return 0; }
 int gpuAdapterIndexForOption(int) { return -1; }
 std::vector<int> gpuAdapterCandidates() { return {}; }
@@ -385,7 +385,7 @@ void rerunGPUCheck()
             return;
         }
         app.gpuChecking = true;
-        app.gpuReport = {"Testing selected GPU..."};
+        app.gpuReport = {"gdc.gpu.testingSelected"};
     }
     std::thread([] {
         std::vector<std::string> report = runGPUCheck();

@@ -9,6 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "core/i18n.h"
 #include "core/platform.h"
 #include "core/settings.h"
 #include "core/strings.h"
@@ -111,15 +112,15 @@ struct Job {
 void runConverter(ModelSettings s)
 {
     TaskState& tab = modelTab.task;
-    tab.begin("Seeking models...");
+    tab.begin(tr("gdc.model.seekingModels"));
     const model::Format* target = model::formatById(s.target);
     if (!target || !target->canWrite) {
-        tab.log("No target format selected.");
-        tab.finish("Nothing to do");
+        tab.log(tr("gdc.model.noTargetFormatSelected"));
+        tab.finish(tr("gdc.common.nothingToDo"));
         return;
     }
     nlohmann::json& targetSettings = s.formatSettings[target->id];
-    tab.log(format("Target %s: %s", target->label.c_str(), model::describeSettings(*target, targetSettings).c_str()));
+    tab.log(format(tr("gdc.model.target"), target->label.c_str(), model::describeSettings(*target, targetSettings).c_str()));
 
     std::vector<std::string> sources;
     walkModels(s.directory, s, [&](const std::string& path, const std::string& ext) {
@@ -150,11 +151,11 @@ void runConverter(ModelSettings s)
     // Largest first, so one big model does not start last and leave the other workers idle.
     std::stable_sort(jobs.begin(), jobs.end(), [](const Job& a, const Job& b) { return a.size > b.size; });
     if (skipped) {
-        tab.log(format("  SKIP: %zu output(s) already exist (enable overwrite to replace)", skipped));
+        tab.log(format(tr("gdc.model.skipOutputSAlreadyExist"), skipped));
     }
     if (jobs.empty()) {
-        tab.log("No models to convert.");
-        tab.finish("Nothing to do");
+        tab.log(tr("gdc.model.noModelsToConvert"));
+        tab.finish(tr("gdc.common.nothingToDo"));
         return;
     }
 
@@ -163,10 +164,10 @@ void runConverter(ModelSettings s)
     nlohmann::json report = nlohmann::json::array();
     size_t done = 0, ok = 0, warned = 0, failed = 0;
     const size_t total = jobs.size();
-    tab.setStatus(format("Converting: 0/%zu", total));
+    tab.setStatus(format(tr("gdc.model.converting0"), total));
 
     const unsigned workers = std::max(1u, std::min<unsigned>(std::thread::hardware_concurrency(), unsigned(total)));
-    tab.log(format("Converting %zu model(s) to %s with %u workers.", total, target->label.c_str(), workers));
+    tab.log(format(tr("gdc.model.convertingModelSToWith"), total, target->label.c_str(), workers));
     runPool(
         jobs.size(), workers, tab,
         [&](size_t j) {
@@ -196,17 +197,17 @@ void runConverter(ModelSettings s)
                     const model::Verdict v = r.validated ? r.report.verdict : model::Verdict::Pass;
                     const char* tag = v == model::Verdict::Fail ? "FAIL" : v == model::Verdict::Warn ? "WARN" : "OK";
                     out.push_back(format("  %s: %s -> %s%s", tag, name.c_str(), outName.c_str(),
-                                         r.validated ? format(" (validation %s)", model::verdictName(v)).c_str() : ""));
+                                         r.validated ? format(tr("gdc.model.validation"), tr(("gdc.model.verdict." + std::string(model::verdictName(v))).c_str())).c_str() : ""));
                     if (s.verboseLog) {
                         for (const std::string& l : r.log) {
                             out.push_back("      " + l);
                         }
                     }
                     for (const std::string& w : loadWarnings) {
-                        out.push_back("      note: " + w);
+                        out.push_back(std::string("      ") + tr("gdc.model.note") + " " + w);
                     }
                     for (const std::string& w : r.warnings) {
-                        out.push_back("      note: " + w);
+                        out.push_back(std::string("      ") + tr("gdc.model.note") + " " + w);
                     }
                     for (const std::string& l : r.report.lines) {
                         if (s.verboseLog || hasPrefix(l, "WARN") || hasPrefix(l, "FAIL")) {
@@ -238,7 +239,7 @@ void runConverter(ModelSettings s)
                 entry["warnings"] = r.warnings;
                 entry["lines"] = r.report.lines;
                 report.push_back(entry);
-                tab.setStatus(format("Converting: %zu/%zu (%zu ok, %zu warn, %zu failed)", done, total, ok, warned, failed));
+                tab.setStatus(format(tr("gdc.model.convertingOkWarnFailed"), done, total, ok, warned, failed));
             }
             return std::string();
         },
@@ -248,16 +249,16 @@ void runConverter(ModelSettings s)
         const fs::path dir = s.mirror && !s.outDir.empty() ? u8path(s.outDir) : u8path(s.directory);
         const fs::path reportPath = dir / "model_validation.json";
         std::ofstream(reportPath, std::ios::binary) << report.dump(2);
-        tab.log("Validation report: " + u8str(reportPath));
+        tab.log(format(tr("gdc.model.validationReport"), u8str(reportPath).c_str()));
     }
     const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (tab.stop) {
-        tab.log("Conversion cancelled.");
-        tab.finish("Cancelled");
+        tab.log(tr("gdc.model.conversionCancelled"));
+        tab.finish(tr("gdc.common.cancelled"));
         return;
     }
-    tab.log(format("Finished in %.2fs (%zu ok, %zu with warnings, %zu failed)", elapsed, ok, warned, failed));
-    tab.finish(format("Done: %zu/%zu converted", ok + warned, total));
+    tab.log(format(tr("gdc.model.finishedInSOkWith"), elapsed, ok, warned, failed));
+    tab.finish(format(tr("gdc.model.doneConverted"), ok + warned, total));
 }
 
 // Draws the settings of one target; returns true when a value changed.
@@ -269,7 +270,7 @@ bool formatSettingsUI(const model::Format& f, nlohmann::json& values)
         if (s.visible && !s.visible(values)) {
             continue;
         }
-        const std::string id = s.label + "##" + f.id + "_" + s.key;
+        const std::string id = trId(s.label, f.id + "_" + s.key);
         int v = values[s.key].get<int>();
         switch (s.type) {
         case model::SettingType::Bool: {
@@ -289,7 +290,7 @@ bool formatSettingsUI(const model::Format& f, nlohmann::json& values)
             }
             break;
         case model::SettingType::Choice:
-            ImGui::TextUnformatted(s.label.c_str());
+            ImGui::TextUnformatted(tr(s.label));
             ImGui::SameLine();
             if (comboStrings(("##" + f.id + "_" + s.key).c_str(), &v, s.choices, px(240))) {
                 changed = true;
@@ -385,29 +386,29 @@ void modelTabInit()
 
 void modelTabUI()
 {
-    if (!ImGui::BeginTabItem("Model Converter")) {
+    if (!ImGui::BeginTabItem(trId("gdc.model.modelConverter", "tab_model").c_str())) {
         return;
     }
     ModelTab& t = modelTab;
     ModelSettings& s = t.settings;
     bool dirty = false;
 
-    ImGui::TextUnformatted("Models directory:");
+    ImGui::TextUnformatted(tr("gdc.model.modelsDirectory"));
     dirty |= ImGui::InputText("##model_directory", &s.directory);
     ImGui::SameLine();
-    if (ImGui::Button("Browse##model_dir")) {
+    if (ImGui::Button(trId("gdc.common.browse", "model_dir").c_str())) {
         openDirPicker(&s.directory);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Scan") && !s.directory.empty()) {
+    if (ImGui::Button(trId("gdc.model.scan", "model_scan").c_str()) && !s.directory.empty()) {
         scan(t);
     }
 
     ImGui::Separator();
-    ImGui::TextUnformatted("Convert from:");
+    ImGui::TextUnformatted(tr("gdc.model.convertFrom"));
     if (t.found.empty()) {
         ImGui::SameLine();
-        ImGui::TextColored(colTextDim, "press Scan to list the model formats in the directory");
+        ImGui::TextColored(colTextDim, "%s", tr("gdc.model.pressScanToListThe"));
     } else {
         int column = 0;
         for (const auto& [ext, count] : t.found) {
@@ -432,12 +433,12 @@ void modelTabUI()
             selected = int(i);
         }
     }
-    ImGui::TextUnformatted("Convert to:");
+    ImGui::TextUnformatted(tr("gdc.model.convertTo"));
     ImGui::SameLine();
     if (!targets.empty() && comboStrings("##model_target", &selected, labels, px(360))) {
         dirty = true;
     }
-    tooltip("CDAE, DTS and every format the game's Assimp can export.");
+    tooltip("gdc.model.convertTo.tooltip");
     const model::Format* target = targets.empty() ? nullptr : targets[size_t(selected)];
     if (target && s.target != target->id) {
         s.target = target->id;
@@ -446,7 +447,7 @@ void modelTabUI()
     if (target) {
         ImGui::Indent();
         if (target->settings.empty()) {
-            ImGui::TextColored(colTextDim, "No extra settings.");
+            ImGui::TextColored(colTextDim, "%s", tr("gdc.model.noExtraSettings"));
         } else {
             dirty |= formatSettingsUI(*target, s.formatSettings[target->id]);
         }
@@ -455,26 +456,24 @@ void modelTabUI()
 
     ImGui::Separator();
     int mode = s.mirror ? 1 : 0;
-    dirty |= ImGui::RadioButton("Write beside the source", &mode, 0);
+    dirty |= ImGui::RadioButton(trId("gdc.model.writeBesideTheSource", "model_mode_beside").c_str(), &mode, 0);
     ImGui::SameLine();
-    dirty |= ImGui::RadioButton("Write into folder (mirrors the source tree)", &mode, 1);
+    dirty |= ImGui::RadioButton(trId("gdc.model.writeIntoFolderMirrorsThe", "model_mode_folder").c_str(), &mode, 1);
     s.mirror = mode == 1;
     if (s.mirror) {
         dirty |= ImGui::InputText("##model_outdir", &s.outDir);
         ImGui::SameLine();
-        if (ImGui::Button("Browse##model_out")) {
+        if (ImGui::Button(trId("gdc.common.browse", "model_out").c_str())) {
             openDirPicker(&s.outDir);
         }
     }
-    dirty |= ImGui::Checkbox("Overwrite existing files", &s.overwrite);
-    tooltip("Off: outputs that already exist are skipped. When two sources share a name (a.fbx, a.dae),\n"
-            "the source extension is kept in the output name (a.fbx.glb).");
+    dirty |= ImGui::Checkbox(trId("gdc.model.overwriteExistingFiles", "model_overwrite").c_str(), &s.overwrite);
+    tooltip("gdc.model.overwriteExistingFiles.tooltip");
     ImGui::SameLine();
-    dirty |= ImGui::Checkbox("Validate against source", &s.validate);
-    tooltip("Re-reads every written file and compares geometry, normals, sharp edges, UVs, colors, tangents,\n"
-            "materials, skin weights and sampled animation with the source. Writes model_validation.json.");
+    dirty |= ImGui::Checkbox(trId("gdc.model.validateAgainstSource", "model_validate").c_str(), &s.validate);
+    tooltip("gdc.model.validateAgainstSource.tooltip");
     ImGui::SameLine();
-    dirty |= ImGui::Checkbox("Verbose log", &s.verboseLog);
+    dirty |= ImGui::Checkbox(trId("gdc.model.verboseLog", "model_verbose").c_str(), &s.verboseLog);
     if (dirty) {
         saveSettings();
     }
@@ -490,20 +489,20 @@ void modelTabUI()
         logLines = t.task.logLines;
     }
     if (running) {
-        if (ImGui::Button("Stop Converter")) {
+        if (ImGui::Button(trId("gdc.model.stopConverter", "model_run").c_str())) {
             t.task.stop = true;
         }
-    } else if (ImGui::Button("Convert Models") && !s.directory.empty()) {
+    } else if (ImGui::Button(trId("gdc.model.convertModels", "model_run").c_str()) && !s.directory.empty()) {
         if (t.found.empty() || t.scannedDir != s.directory) {
             scan(t);
         }
         t.task.log("");
         std::thread(runConverter, s).detach();
     }
-    ImGui::Text("Status: %s", status.empty() ? "Waiting..." : status.c_str());
+    ImGui::Text(tr("gdc.common.status"), status.empty() ? tr("gdc.common.waiting") : status.c_str());
 
     ImGui::Separator();
-    ImGui::TextUnformatted("Output:");
+    ImGui::TextUnformatted(tr("gdc.common.output"));
     logView("##model_log", logLines, 280, modelLogColor);
     ImGui::EndTabItem();
 }

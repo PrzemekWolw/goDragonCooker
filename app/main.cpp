@@ -20,6 +20,7 @@
 #endif
 
 #include "app_icon.h"
+#include "core/i18n.h"
 #include "core/settings.h"
 #include "core/task.h"
 #include "gpu/gpu.h"
@@ -104,6 +105,29 @@ static void setTitleBarColor(GLFWwindow* window)
 #endif
 }
 
+// Right-aligned row above the tabs.
+static void languageSelectorUI()
+{
+    std::vector<std::string> names;
+    for (const LanguageInfo& l : languages()) {
+        names.push_back(l.nativeName);
+    }
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float comboWidth = px(140);
+    const float labelWidth = ImGui::CalcTextSize(tr("gdc.common.language")).x + style.ItemSpacing.x;
+    const float x = ImGui::GetContentRegionMax().x - comboWidth - labelWidth - style.ItemSpacing.x;
+    if (x > ImGui::GetCursorPosX()) {
+        ImGui::SetCursorPosX(x);
+    }
+    ImGui::TextUnformatted(tr("gdc.common.language"));
+    ImGui::SameLine();
+    int index = currentLanguage();
+    if (comboStrings("##language", &index, names, comboWidth)) {
+        setLanguage(index);
+        saveSettings();
+    }
+}
+
 static void renderUI()
 {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -127,9 +151,9 @@ static void renderUI()
         ImGui::OpenPopup("texconv_warning");
     }
     if (ImGui::BeginPopupModal("texconv_warning", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Warning: %s", texconvWarn.c_str());
+        ImGui::Text(tr("gdc.common.warning"), texconvWarn.c_str());
         ImGui::Dummy(ImVec2(0, px(10)));
-        if (ImGui::Button("OK")) {
+        if (ImGui::Button(trId("gdc.common.ok", "texconv_ok").c_str())) {
             {
                 std::lock_guard lock(app.mu);
                 app.warnShown = false;
@@ -139,6 +163,7 @@ static void renderUI()
         ImGui::EndPopup();
     }
 
+    languageSelectorUI();
     ImGui::Separator();
     if (ImGui::BeginTabBar("##tabs")) {
         cookTabUI();
@@ -153,6 +178,7 @@ static void renderUI()
 
 int main()
 {
+    i18nInit();
     registerGpuSettings();
     cookTabInit();
     matGenTabInit();

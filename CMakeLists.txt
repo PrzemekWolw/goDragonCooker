@@ -93,14 +93,39 @@ function(gdc_target_options target)
     endif()
 endfunction()
 
+# Translations: Locale files (app/locales/<locale>/main.translation.json), embedded as byte
+# arrays like the icon. The order here is the order of the language list in app/core/i18n.cpp.
+set(GDC_LOCALES en-US pl_PL es_ES de_DE it_IT)
+set(GDC_LOCALE_ARRAYS "")
+set(GDC_LOCALE_TABLE "")
+set(GDC_LOCALE_INDEX 0)
+foreach(locale ${GDC_LOCALES})
+    set(locale_file "${CMAKE_CURRENT_SOURCE_DIR}/app/locales/${locale}/main.translation.json")
+    file(READ "${locale_file}" locale_hex HEX)
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," locale_bytes "${locale_hex}")
+    string(LENGTH "${locale_hex}" locale_hex_length)
+    math(EXPR locale_size "${locale_hex_length} / 2")
+    string(APPEND GDC_LOCALE_ARRAYS "static const unsigned char locale${GDC_LOCALE_INDEX}[] = {${locale_bytes}};\n")
+    string(APPEND GDC_LOCALE_TABLE "    {locale${GDC_LOCALE_INDEX}, ${locale_size}},\n")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${locale_file}")
+    math(EXPR GDC_LOCALE_INDEX "${GDC_LOCALE_INDEX} + 1")
+endforeach()
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/locales_data.h"
+    "#pragma once\n#include <cstddef>\n${GDC_LOCALE_ARRAYS}"
+    "struct LocaleData { const unsigned char* data; size_t size; };\n"
+    "static const LocaleData kLocaleData[] = {\n${GDC_LOCALE_TABLE}};\n"
+    "static const size_t kLocaleDataCount = ${GDC_LOCALE_INDEX};\n")
+
 # Strings, paths, background tasks, settings. No UI, no codecs.
 add_library(gdc_core STATIC
     app/core/strings.cpp
     app/core/platform.cpp
     app/core/task.cpp
-    app/core/settings.cpp)
+    app/core/settings.cpp
+    app/core/i18n.cpp)
 gdc_target_options(gdc_core)
 target_link_libraries(gdc_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads ${CMAKE_DL_LIBS})
+target_include_directories(gdc_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 # Texture codecs (texconv, Compressonator Vulkan) and cook rules.
 add_library(gdc_texture STATIC
@@ -128,6 +153,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app/tests/model_test.cpp")
     add_executable(gdc_model_test app/tests/model_test.cpp)
     gdc_target_options(gdc_model_test)
     target_link_libraries(gdc_model_test PRIVATE gdc_model)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app/tests/i18n_test.cpp")
+    add_executable(gdc_i18n_test app/tests/i18n_test.cpp)
+    gdc_target_options(gdc_i18n_test)
+    target_link_libraries(gdc_i18n_test PRIVATE gdc_model)
 endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app/tests/cook_test.cpp")

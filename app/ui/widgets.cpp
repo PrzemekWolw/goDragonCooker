@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "core/i18n.h"
 #include "core/platform.h"
 #include "core/strings.h"
 #include "imgui_stdlib.h"
@@ -11,11 +12,11 @@ bool comboStrings(const char* id, int* index, const std::vector<std::string>& it
 {
     bool changed = false;
     ImGui::SetNextItemWidth(width);
-    if (ImGui::BeginCombo(id, items[*index].c_str())) {
+    if (ImGui::BeginCombo(id, tr(items[*index]))) {
         for (int i = 0; i < int(items.size()); ++i) {
             const bool selected = i == *index;
             ImGui::PushID(i);
-            if (ImGui::Selectable(items[i].c_str(), selected)) {
+            if (ImGui::Selectable(tr(items[i]), selected)) {
                 changed = i != *index;
                 *index = i;
             }
@@ -32,7 +33,7 @@ bool comboStrings(const char* id, int* index, const std::vector<std::string>& it
 void tooltip(const char* text)
 {
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("%s", text);
+        ImGui::SetTooltip("%s", tr(text));
     }
 }
 
@@ -72,23 +73,23 @@ void renderDirPicker()
         ImGui::SetNextWindowFocus();
         dirPicker.appearing = false;
     }
-    if (ImGui::Begin("Pick Directory", &dirPicker.open, ImGuiWindowFlags_NoCollapse)) {
+    if (ImGui::Begin(trId("gdc.common.pickDirectory", "pick_directory").c_str(), &dirPicker.open, ImGuiWindowFlags_NoCollapse)) {
         ImGui::InputText("##picker_path", &dirPicker.pathStr);
         ImGui::SameLine();
-        if (ImGui::Button("Up")) {
+        if (ImGui::Button(trId("gdc.common.up", "picker_up").c_str())) {
             const fs::path parent = u8path(dirPicker.pathStr).parent_path();
             if (!parent.empty()) {
                 dirPicker.pathStr = u8str(parent);
             }
         }
         ImGui::Separator();
-        ImGui::TextUnformatted("Folders");
+        ImGui::TextUnformatted(tr("gdc.common.folders"));
 
         if (ImGui::BeginChild("##picker_list", ImVec2(0, -px(70)), ImGuiChildFlags_Borders)) {
             const fs::path path = u8path(dirPicker.pathStr);
             std::error_code ec;
             if (!fs::is_directory(path, ec)) {
-                ImGui::Text("Cannot read: %s", dirPicker.pathStr.c_str());
+                ImGui::Text(tr("gdc.common.cannotRead"), dirPicker.pathStr.c_str());
             } else {
                 std::vector<std::string> names;
                 for (const auto& entry : fs::directory_iterator(path, ec)) {
@@ -107,12 +108,12 @@ void renderDirPicker()
         }
         ImGui::EndChild();
 
-        if (ImGui::Button("Select")) {
+        if (ImGui::Button(trId("gdc.common.select", "picker_select").c_str())) {
             *dirPicker.target = dirPicker.pathStr;
             dirPicker.open = false;
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel")) {
+        if (ImGui::Button(trId("gdc.common.cancel", "picker_cancel").c_str())) {
             dirPicker.open = false;
         }
     }

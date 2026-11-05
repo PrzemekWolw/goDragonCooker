@@ -9,6 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "core/i18n.h"
 #include "core/platform.h"
 #include "core/strings.h"
 #include "core/task.h"
@@ -203,19 +204,19 @@ static int mergeMaterials(const fs::path& path, const std::map<std::string, Json
     if (fs::exists(path, ec)) {
         std::ifstream file(path, std::ios::binary);
         if (!file) {
-            error = "cannot read " + u8str(path);
+            error = format(tr("gdc.matgen.cannotRead"), u8str(path).c_str());
             return -1;
         }
         try {
             merged = Json::parse(file);
         } catch (const std::exception& e) {
-            error = std::string("invalid existing materials file: ") + e.what();
+            error = format(tr("gdc.matgen.invalidExistingMaterialsFile"), e.what());
             return -1;
         }
         if (merged.is_null()) {
             merged = Json::object();
         } else if (!merged.is_object()) {
-            error = "invalid existing materials file: not a JSON object";
+            error = tr("gdc.matgen.invalidExistingMaterialsFileNot");
             return -1;
         }
     }
@@ -255,7 +256,7 @@ static int mergeMaterials(const fs::path& path, const std::map<std::string, Json
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     file << sorted.dump(2, ' ', false, Json::error_handler_t::replace) << '\n';
     if (!file) {
-        error = "cannot write " + u8str(path);
+        error = format(tr("gdc.matgen.cannotWrite"), u8str(path).c_str());
         return -1;
     }
     return added;
@@ -264,26 +265,26 @@ static int mergeMaterials(const fs::path& path, const std::map<std::string, Json
 static void runMatGen(std::string directory, MatGenSettings settings)
 {
     TaskState& tab = matGenTab.task;
-    tab.begin("Scanning...");
+    tab.begin(tr("gdc.matgen.scanning"));
 
     const fs::path root = cleanPath(directory);
     const fs::path levelsRoot = findLevelsRoot(root);
     if (levelsRoot.empty()) {
-        tab.log("ERROR: no 'levels' directory found in: " + directory);
-        tab.finish("Error");
+        tab.log(format(tr("gdc.matgen.errorNoLevelsDirectoryFound"), directory.c_str()));
+        tab.finish(tr("gdc.common.error"));
         return;
     }
 
-    tab.log("Textures root: " + directory);
-    tab.log("Tex path:     " + computeTexPathForDirectory(levelsRoot, root));
+    tab.log(format(tr("gdc.matgen.texturesRoot"), directory.c_str()));
+    tab.log(format(tr("gdc.matgen.texPath"), computeTexPathForDirectory(levelsRoot, root).c_str()));
 
     std::vector<TexEntry> allEntries = settings.suffixes;
     allEntries.insert(allEntries.end(), settings.customSuffixes.begin(), settings.customSuffixes.end());
     if (!settings.customSuffixes.empty()) {
-        tab.log(format("Custom patterns: %zu entries", settings.customSuffixes.size()));
+        tab.log(format(tr("gdc.matgen.customPatternsEntries"), settings.customSuffixes.size()));
     }
     if (settings.enableDetailMaps) {
-        tab.log(format("Detail maps:  enabled (scale %.2f x %.2f)", settings.detailScaleX, settings.detailScaleY));
+        tab.log(format(tr("gdc.matgen.detailMapsEnabledScaleX"), settings.detailScaleX, settings.detailScaleY));
     }
     if (settings.instanceOpacity) {
         tab.log("Instance opacity: true");
@@ -295,8 +296,8 @@ static void runMatGen(std::string directory, MatGenSettings settings)
 
     std::error_code ec;
     if (!fs::is_directory(root, ec)) {
-        tab.log("Walk error: cannot read " + directory);
-        tab.finish("Error");
+        tab.log("ERROR: " + format(tr("gdc.common.walkErrorCannotRead"), directory.c_str()));
+        tab.finish(tr("gdc.common.error"));
         return;
     }
     std::vector<fs::path> directories = {root};
@@ -310,8 +311,8 @@ static void runMatGen(std::string directory, MatGenSettings settings)
     int totalGroups = 0;
     for (const fs::path& path : directories) {
         if (tab.stop) {
-            tab.log("Generation cancelled.");
-            tab.finish("Cancelled");
+            tab.log(tr("gdc.matgen.generationCancelled"));
+            tab.finish(tr("gdc.common.cancelled"));
             return;
         }
 
@@ -363,21 +364,21 @@ static void runMatGen(std::string directory, MatGenSettings settings)
         std::string error;
         const int added = mergeMaterials(path / u8path(dirName + ".materials.json"), output, error);
         if (added < 0) {
-            tab.log(format("  WRITE ERROR in %s: %s", dirName.c_str(), error.c_str()));
+            tab.log(format(tr("gdc.matgen.errorWriteFailedIn"), dirName.c_str(), error.c_str()));
             continue;
         }
 
         totalGroups += added;
         if (added == 0) {
-            tab.log(format("  %s/ -> unchanged (%zu existing materials)", dirName.c_str(), output.size()));
+            tab.log(format(tr("gdc.matgen.unchangedExistingMaterials"), dirName.c_str(), output.size()));
         } else {
-            tab.log(format("  %s/ -> %s.materials.json (%d new materials)", dirName.c_str(), dirName.c_str(), added));
+            tab.log(format(tr("gdc.matgen.materialsJsonNewMaterials"), dirName.c_str(), dirName.c_str(), added));
         }
-        tab.setStatus(format("Generated %d material groups", totalGroups));
+        tab.setStatus(format(tr("gdc.matgen.generatedMaterialGroups"), totalGroups));
     }
 
-    tab.log(format("\nDone. %d material groups generated.", totalGroups));
-    tab.finish(format("Done: %d groups", totalGroups));
+    tab.log(format(tr("gdc.matgen.doneMaterialGroupsGenerated"), totalGroups));
+    tab.finish(format(tr("gdc.matgen.doneGroups"), totalGroups));
 }
 
 // ---------------------------------------------------------------------------
@@ -393,19 +394,19 @@ struct PatternInfo {
 };
 
 static const PatternInfo patterns[] = {
-    {"baseColorMap", "Base color", "Main surface color", "_b", 0},
-    {"normalMap", "Normal", "Surface normal detail", "_nm", 1},
-    {"roughnessMap", "Roughness", "Surface roughness", "_r", 2},
-    {"metallicMap", "Metallic", "Metal surface mask", "_m", 2},
-    {"ambientOcclusionMap", "Ambient occlusion", "Ambient light occlusion", "_ao", 2},
-    {"emissiveMap", "Emissive", "Self-lit surface", "_e", 0},
-    {"opacityMap", "Opacity", "Transparency mask", "_o", 2},
-    {"detailMap", "Detail color", "Fine color detail", "_dd", 0},
-    {"detailNormalMap", "Detail normal", "Fine normal detail", "_dn", 1},
-    {"opacityDetailMap", "Detail opacity", "Fine transparency detail", "_do", 2},
-    {"metallicDetailMap", "Detail metallic", "Fine metallic detail", "_dm", 2},
-    {"roughnessDetailMap", "Detail roughness", "Fine roughness detail", "_dr", 2},
-    {"ambientOcclusionDetailMap", "Detail ambient occlusion", "Fine occlusion detail", "_dao", 2},
+    {"baseColorMap", "gdc.matgen.pattern.baseColorMap.name", "gdc.matgen.pattern.baseColorMap.description", "_b", 0},
+    {"normalMap", "gdc.matgen.pattern.normalMap.name", "gdc.matgen.pattern.normalMap.description", "_nm", 1},
+    {"roughnessMap", "gdc.matgen.pattern.roughnessMap.name", "gdc.matgen.pattern.roughnessMap.description", "_r", 2},
+    {"metallicMap", "gdc.matgen.pattern.metallicMap.name", "gdc.matgen.pattern.metallicMap.description", "_m", 2},
+    {"ambientOcclusionMap", "gdc.matgen.pattern.ambientOcclusionMap.name", "gdc.matgen.pattern.ambientOcclusionMap.description", "_ao", 2},
+    {"emissiveMap", "gdc.matgen.pattern.emissiveMap.name", "gdc.matgen.pattern.emissiveMap.description", "_e", 0},
+    {"opacityMap", "gdc.matgen.pattern.opacityMap.name", "gdc.matgen.pattern.opacityMap.description", "_o", 2},
+    {"detailMap", "gdc.matgen.pattern.detailMap.name", "gdc.matgen.pattern.detailMap.description", "_dd", 0},
+    {"detailNormalMap", "gdc.matgen.pattern.detailNormalMap.name", "gdc.matgen.pattern.detailNormalMap.description", "_dn", 1},
+    {"opacityDetailMap", "gdc.matgen.pattern.opacityDetailMap.name", "gdc.matgen.pattern.opacityDetailMap.description", "_do", 2},
+    {"metallicDetailMap", "gdc.matgen.pattern.metallicDetailMap.name", "gdc.matgen.pattern.metallicDetailMap.description", "_dm", 2},
+    {"roughnessDetailMap", "gdc.matgen.pattern.roughnessDetailMap.name", "gdc.matgen.pattern.roughnessDetailMap.description", "_dr", 2},
+    {"ambientOcclusionDetailMap", "gdc.matgen.pattern.ambientOcclusionDetailMap.name", "gdc.matgen.pattern.ambientOcclusionDetailMap.description", "_dao", 2},
 };
 
 static const std::vector<std::string> allExtOpts = {
@@ -440,7 +441,7 @@ static void renderPatternRow(const PatternInfo& info)
 
     ImGui::Separator();
     ImGui::PushStyleColor(ImGuiCol_Text, colTextDim);
-    ImGui::TextUnformatted(info.name);
+    ImGui::TextUnformatted(tr(info.name));
     ImGui::PopStyleColor();
 
     for (size_t index = 0; index < custom.size(); ++index) {
@@ -456,7 +457,7 @@ static void renderPatternRow(const PatternInfo& info)
         }
         const std::string id = stage + "_" + std::to_string(index);
         patternEditRow(id, buf);
-        if (ImGui::Button(("Save##upd_" + id).c_str())) {
+        if (ImGui::Button(trId("gdc.matgen.save", "upd_" + id).c_str())) {
             const std::string suffix = trim(buf.suffix);
             if (!suffix.empty()) {
                 custom[index] = {suffix, allExtOpts[buf.extIdx], stage};
@@ -464,7 +465,7 @@ static void renderPatternRow(const PatternInfo& info)
             }
         }
         ImGui::SameLine();
-        if (ImGui::Button(("Remove##rem_" + id).c_str())) {
+        if (ImGui::Button(trId("gdc.matgen.remove", "rem_" + id).c_str())) {
             custom.erase(custom.begin() + std::ptrdiff_t(index));
             for (auto it = m.patternBufs.begin(); it != m.patternBufs.end();) {
                 it = hasPrefix(it->first, stage + "#") ? m.patternBufs.erase(it) : std::next(it);
@@ -480,7 +481,7 @@ static void renderPatternRow(const PatternInfo& info)
         draft.extIdx = info.extIdx;
     }
     patternEditRow(stage + "_ext", draft);
-    if (ImGui::Button(("Add pattern##add_" + stage).c_str())) {
+    if (ImGui::Button(trId("gdc.matgen.addPattern", "add_" + stage).c_str())) {
         const std::string suffix = trim(draft.suffix);
         if (!suffix.empty()) {
             custom.push_back({suffix, allExtOpts[draft.extIdx], stage});
@@ -492,42 +493,43 @@ static void renderPatternRow(const PatternInfo& info)
 
 void matGenTabUI()
 {
-    if (!ImGui::BeginTabItem("Material Generator")) {
+    if (!ImGui::BeginTabItem(trId("gdc.matgen.materialGenerator", "tab_matgen").c_str())) {
         return;
     }
     MatGenTab& m = matGenTab;
     MatGenSettings& s = m.settings;
 
-    ImGui::TextUnformatted("Textures directory:");
+    ImGui::TextUnformatted(tr("gdc.common.texturesDirectory"));
     ImGui::InputText("##matgen_directory", &m.directory);
     ImGui::SameLine();
-    if (ImGui::Button("Browse")) {
+    if (ImGui::Button(trId("gdc.common.browse", "matgen_browse").c_str())) {
         openDirPicker(&m.directory);
     }
 
     ImGui::Separator();
 
-    if (ImGui::TreeNodeEx("Basic Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Checkbox("Instance opacity", &s.instanceOpacity);
-        tooltip("Set instanceOpacity=true on stages that have an opacity map.");
-        ImGui::Checkbox("Instance emissive", &s.instanceEmissive);
-        tooltip("Set instanceEmissive=true on stages that have an emissive map.");
+    if (ImGui::TreeNodeEx(trId("gdc.matgen.basicSettings", "matgen_basic").c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox(trId("gdc.matgen.instanceOpacity", "matgen_inst_opacity").c_str(), &s.instanceOpacity);
+        tooltip("gdc.matgen.instanceOpacity.tooltip");
+        ImGui::Checkbox(trId("gdc.matgen.instanceEmissive", "matgen_inst_emissive").c_str(), &s.instanceEmissive);
+        tooltip("gdc.matgen.instanceEmissive.tooltip");
         ImGui::TreePop();
     }
 
-    if (ImGui::TreeNode("Detail Maps")) {
-        ImGui::Checkbox("Enable detail maps (wire up _dd, _dn, etc.)", &s.enableDetailMaps);
-        tooltip("When both base and detail textures exist in a directory, auto-wire them into the output.");
+    if (ImGui::TreeNode(trId("gdc.matgen.detailMaps", "matgen_detail").c_str())) {
+        ImGui::Checkbox(trId("gdc.matgen.enableDetailMapsWireUp", "matgen_detail_on").c_str(),
+                        &s.enableDetailMaps);
+        tooltip("gdc.matgen.enableDetailMapsWireUp.tooltip");
         if (s.enableDetailMaps) {
             float x = float(s.detailScaleX);
             float y = float(s.detailScaleY);
-            ImGui::TextUnformatted("Detail scale:");
+            ImGui::TextUnformatted(tr("gdc.matgen.detailScale"));
             ImGui::SameLine();
             ImGui::SetNextItemWidth(px(120));
             if (ImGui::InputFloat("##detail_scale_x", &x, 0.01f, 0.0f, "%.2f")) {
                 s.detailScaleX = x;
             }
-            tooltip("UV tiling X for detail maps.");
+            tooltip("gdc.matgen.uvTilingXForDetail");
             ImGui::SameLine();
             ImGui::TextUnformatted("x ");
             ImGui::SameLine();
@@ -535,15 +537,15 @@ void matGenTabUI()
             if (ImGui::InputFloat("##detail_scale_y", &y, 0.01f, 0.0f, "%.2f")) {
                 s.detailScaleY = y;
             }
-            tooltip("UV tiling Y for detail maps.");
+            tooltip("gdc.matgen.uvTilingYForDetail");
         }
         ImGui::TreePop();
     }
 
-    if (ImGui::TreeNode("Texture Patterns")) {
+    if (ImGui::TreeNode(trId("gdc.matgen.texturePatterns", "matgen_patterns").c_str())) {
         ImGui::PushStyleColor(ImGuiCol_Text, colTextDim);
-        ImGui::TextUnformatted(
-            "Built-in patterns are used automatically. Add a custom pattern for a different filename convention.");
+        ImGui::TextUnformatted(tr(
+            "gdc.matgen.builtInPatternsAreUsed"));
         ImGui::PopStyleColor();
         if (ImGui::BeginChild("##patterns", ImVec2(0, 390), ImGuiChildFlags_Borders)) {
             for (const PatternInfo& info : patterns) {
@@ -566,18 +568,18 @@ void matGenTabUI()
         logLines = m.task.logLines;
     }
     if (running) {
-        if (ImGui::Button("Stop Generator")) {
+        if (ImGui::Button(trId("gdc.matgen.stopGenerator", "matgen_run").c_str())) {
             m.task.stop = true;
         }
-    } else if (ImGui::Button("Generate Materials") && !m.directory.empty()) {
+    } else if (ImGui::Button(trId("gdc.matgen.generateMaterials", "matgen_run").c_str()) && !m.directory.empty()) {
         m.task.log("");
         std::thread(runMatGen, m.directory, s).detach();
     }
     ImGui::SameLine();
-    ImGui::Text("Status: %s", status.empty() ? "Waiting..." : status.c_str());
+    ImGui::Text(tr("gdc.common.status"), status.empty() ? tr("gdc.common.waiting") : status.c_str());
 
     ImGui::Separator();
-    ImGui::TextUnformatted("Output:");
+    ImGui::TextUnformatted(tr("gdc.common.output"));
     logView("##matgen_log", logLines, 0, [](const std::string& line) {
         const std::string lower = toLower(line);
         const bool isError = lower.find("error") != std::string::npos || lower.find("fail") != std::string::npos;
