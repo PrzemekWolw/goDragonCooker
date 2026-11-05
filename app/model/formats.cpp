@@ -334,7 +334,8 @@ struct Registry {
             std::string e;
             while (exts >> e) {
                 // Assimp's Terragen reader would claim BeamNG's own .ter terrain files, which are not Terragen.
-                if (toLower(e) != "ter") {
+                // Its .blend reader only knows old Blender versions, and the game never loads .blend anyway.
+                if (toLower(e) != "ter" && toLower(e) != "blend") {
                     f.exts.push_back("." + toLower(e));
                 }
             }
