@@ -1,16 +1,59 @@
-#include "app.h"
+#include "tabs/tabs.h"
 
 #include <algorithm>
 #include <fstream>
+#include <map>
 #include <set>
 #include <sstream>
 #include <thread>
 
 #include <nlohmann/json.hpp>
 
+#include "core/platform.h"
+#include "core/strings.h"
+#include "core/task.h"
+#include "imgui.h"
 #include "imgui_stdlib.h"
+#include "ui/theme.h"
+#include "ui/widgets.h"
 
 using Json = nlohmann::ordered_json;
+
+namespace {
+
+struct TexEntry {
+    std::string suffix;
+    std::string ext;
+    std::string stageKey;
+};
+
+struct MatGenSettings {
+    std::vector<TexEntry> suffixes;
+    std::vector<TexEntry> customSuffixes;
+    double detailScaleX = 0.1;
+    double detailScaleY = 0.1;
+    bool instanceOpacity = false;
+    bool instanceEmissive = false;
+    bool enableDetailMaps = false;
+};
+
+struct PatternEditBuf {
+    std::string suffix;
+    int extIdx = 0;
+    bool dirty = false;
+};
+
+// UI-thread-only fields are plain; runs get copies.
+struct MatGenTab {
+    TaskState task;
+    std::string directory;
+    MatGenSettings settings;
+    std::map<std::string, PatternEditBuf> patternBufs;
+};
+
+MatGenTab matGenTab;
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Material Generator
@@ -43,11 +86,9 @@ static const char* detailStageKeys[] = {
     "ambientOcclusionDetailMap",
 };
 
-MatGenSettings defaultMatGenSettings()
+void matGenTabInit()
 {
-    MatGenSettings settings;
-    settings.suffixes = defaultTextureEntries;
-    return settings;
+    matGenTab.settings.suffixes = defaultTextureEntries;
 }
 
 static bool matchTex(const std::string& name, const std::vector<TexEntry>& entries, std::string& base,
@@ -537,15 +578,10 @@ void matGenTabUI()
 
     ImGui::Separator();
     ImGui::TextUnformatted("Output:");
-    if (ImGui::BeginChild("##matgen_log", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
-        for (const std::string& line : logLines) {
-            const std::string lower = toLower(line);
-            const bool isError = lower.find("error") != std::string::npos || lower.find("fail") != std::string::npos;
-            ImGui::PushStyleColor(ImGuiCol_Text, isError ? colCookErr : colText);
-            ImGui::TextUnformatted(line.c_str());
-            ImGui::PopStyleColor();
-        }
-    }
-    ImGui::EndChild();
+    logView("##matgen_log", logLines, 0, [](const std::string& line) {
+        const std::string lower = toLower(line);
+        const bool isError = lower.find("error") != std::string::npos || lower.find("fail") != std::string::npos;
+        return isError ? colCookErr : colText;
+    });
     ImGui::EndTabItem();
 }

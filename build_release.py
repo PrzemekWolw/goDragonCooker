@@ -357,8 +357,8 @@ def binary_path(target: dict) -> Path:
 
 def get_sources() -> list[Path]:
     out = [PROJECT / "CMakeLists.txt", VERSION_FILE]
-    out.extend(APP_SOURCE.glob("*.cpp"))
-    out.extend(APP_SOURCE.glob("*.h"))
+    out.extend(APP_SOURCE.rglob("*.cpp"))
+    out.extend(APP_SOURCE.rglob("*.h"))
     out.append(APP_SOURCE / "dragonpbr.ico")
     if VULKAN_SOURCE.exists():
         out.extend(path for path in VULKAN_SOURCE.rglob("*") if path.is_file())

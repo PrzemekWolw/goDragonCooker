@@ -1,8 +1,11 @@
-#include "app.h"
+#include "texture/imageheader.h"
 
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <map>
+
+#include "core/strings.h"
 
 static const std::map<std::string, std::string> supportedImageExtensions = {
     {".bmp", "bmp"},   {".exr", "exr"}, {".hdr", "hdr"}, {".jpeg", "jpeg"}, {".jpg", "jpeg"},

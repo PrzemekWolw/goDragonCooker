@@ -1,7 +1,11 @@
-#include "app.h"
+#include "texture/vulkan_codec.h"
 
 #include <cstdint>
+#include <mutex>
 #include <shared_mutex>
+
+#include "core/platform.h"
+#include "core/strings.h"
 
 #include "native/vulkan/gdc_vulkan.h"
 

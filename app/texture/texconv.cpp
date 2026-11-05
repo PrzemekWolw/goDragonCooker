@@ -1,7 +1,11 @@
-#include "app.h"
+#include "texture/texconv.h"
 
 #include <cstdlib>
 #include <cwchar>
+#include <mutex>
+
+#include "core/platform.h"
+#include "core/strings.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -55,7 +59,6 @@ static std::string fromWide(const wchar_t* s)
 #endif
 }
 
-// Loads the texconv shared library. Returns an error message, empty on success.
 std::string texconvInit()
 {
     std::lock_guard lock(texconvInitMu);
@@ -111,7 +114,6 @@ static bool containsGPUCodecFormat(const std::vector<std::string>& args)
     return false;
 }
 
-// Returns an error message, empty on success. BC6H/BC7 calls are serialized; other formats may run concurrently.
 std::string texconvRun(const std::vector<std::string>& args, bool forceCPU)
 {
     if (std::string error = texconvInit(); !error.empty()) {
