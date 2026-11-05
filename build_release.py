@@ -7,7 +7,7 @@ UPX-compressed when UPX is installed.
 Usage:
     python build_release.py              # build Linux and Windows targets
     python build_release.py --linux      # Linux only
-    python build_release.py --macos      # macOS only
+    python build_release.py --macos      # macOS ARM64 only
     python build_release.py --windows    # Windows only
     python build_release.py --arm64      # ARM64 targets only
     python build_release.py --clean      # remove artifacts before building
@@ -19,7 +19,7 @@ Requires:
     - CMake 3.21+ and a C++17 compiler. On Windows the app builds with the
       installed Visual Studio (2022 or 2026, -A x64 or -A ARM64), so ARM64
       cross-compiles from an x64 host. Linux and macOS use the system compiler;
-      macOS builds must run on macOS (11 or newer).
+      macOS builds are ARM64 and must run on macOS (11 or newer).
     - MinGW-w64 for the Windows x64 Compressonator backend, and the Visual
       Studio ARM64 tools for the Windows ARM64 backend
     - aarch64 cross-compilers when compiling Linux ARM64 off an x64 host
@@ -87,7 +87,6 @@ def make_target(platform_name: str, goos: str, goarch: str, arch_name: str) -> d
 TARGETS = [
     make_target("linux", "linux", "amd64", "x64"),
     make_target("linux", "linux", "arm64", "arm64"),
-    make_target("macos", "darwin", "amd64", "x64"),
     make_target("macos", "darwin", "arm64", "arm64"),
     make_target("windows", "windows", "amd64", "x64"),
     make_target("windows", "windows", "arm64", "arm64"),
@@ -649,25 +648,11 @@ def build_texconv(targets: list[dict], skip: bool):
     if not host_targets:
         return
 
-    build_universal = (
-        host_target == "macos"
-        and {target["goarch"] for target in targets if target["platform"] == "macos"}
-        == {"amd64", "arm64"}
-    )
-
-    build_targets = [host_targets[0]] if build_universal else host_targets
-    for target in build_targets:
-        build_texconv_target(target, build_universal)
-    if build_universal:
-        source = texconv_library(host_targets[0])
-        for target in host_targets[1:]:
-            destination = texconv_library(target)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(source), str(destination))
-            log(f"Installed {destination}")
+    for target in host_targets:
+        build_texconv_target(target)
 
 
-def build_texconv_target(target: dict, universal: bool):
+def build_texconv_target(target: dict):
     source_binary = TEXCONV_SOURCE / target["texconv_lib"]
     destination = texconv_library(target)
     texconv_source = TEXCONV_SOURCE / "TexconvDLL" / "texconv.cpp"
@@ -689,10 +674,7 @@ def build_texconv_target(target: dict, universal: bool):
             "--generator",
             visual_studio_generator(),
         ]
-        if universal:
-            command.append("--universal")
-        else:
-            command.extend(["--architecture", architecture])
+        command.extend(["--architecture", architecture])
         build_result = run(command, cwd=TEXCONV_SOURCE)
     else:
         build_script = TEXCONV_SOURCE / "scripts" / "build.sh"
@@ -713,11 +695,9 @@ def build_texconv_target(target: dict, universal: bool):
                     str(normalized_script),
                     "--use-optional-formats",
                     "--no-texassemble",
-                ] + (
-                    ["--universal"]
-                    if universal
-                    else ["--architecture", architecture]
-                ),
+                    "--architecture",
+                    architecture,
+                ],
                 cwd=TEXCONV_SOURCE,
                 env=(
                     linux_compiler_env(target)
@@ -849,9 +829,8 @@ def build_vulkan(targets: list[dict], skip: bool):
                 # runner can resolve to the x86_64 MinGW (C:\mingw64).
                 configure.append(f"-DCMAKE_C_COMPILER={env['CC']}")
             if target["platform"] == "macos":
-                arch = "x86_64" if target["goarch"] == "amd64" else "arm64"
                 configure += [
-                    f"-DCMAKE_OSX_ARCHITECTURES={arch}",
+                    "-DCMAKE_OSX_ARCHITECTURES=arm64",
                     "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0",
                 ]
             if env.get("CXX"):
@@ -1019,11 +998,10 @@ def app_cmake_command(target: dict) -> tuple[list[str], dict[str, str], Path]:
         command += ["-G", visual_studio_generator(), "-A", arch]
     elif target["platform"] == "macos":
         compiler = darwin_compiler_env(target)
-        arch = "x86_64" if target["goarch"] == "amd64" else "arm64"
         command += [
             f"-DCMAKE_C_COMPILER={compiler['CC']}",
             f"-DCMAKE_CXX_COMPILER={compiler['CXX']}",
-            f"-DCMAKE_OSX_ARCHITECTURES={arch}",
+            "-DCMAKE_OSX_ARCHITECTURES=arm64",
         ]
     else:
         if target["platform"] == "windows":

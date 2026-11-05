@@ -5,10 +5,11 @@ repository root.
 
 ## Checkout
 
-Both native backends are Git submodules. `Texconv-Custom-DLL` has nested
-submodules of its own (DirectXTex, DirectX-Headers, DirectXMath,
-safestringlib), so the `--recursive` flag is required - without it the
-Texconv CMake configuration fails on the empty `DirectXTex/` directory:
+The native backends and Assimp are Git submodules. `Texconv-Custom-DLL` has
+nested submodules of its own (DirectXTex, DirectX-Headers, DirectXMath,
+safestringlib), so the `--recursive` flag is required. Without it the
+Texconv CMake configuration fails on the empty `DirectXTex/` directory, and
+the application configure fails on the empty `third_party/assimp` directory:
 
 ```bash
 git submodule update --init --recursive
@@ -21,8 +22,10 @@ git submodule update --init --recursive
   2026; `build_release.py` picks the matching CMake generator), including the
   ARM64 toolset for Windows ARM64, which cross-compiles from an x64 host.
   Linux uses GCC or Clang. macOS builds run on macOS 11 or newer with Apple clang.
-- CMake 3.21 or newer. The first configure downloads GLFW, Dear ImGui, and
-  nlohmann/json.
+- CMake 3.21 or newer. The first configure downloads GLFW 3.4, Dear ImGui
+  v1.92.9b, nlohmann/json v3.12.0, msgpack-cxx 7.0.0, and zstd 1.5.7.
+  Assimp 6.0.5 is the `third_party/assimp` submodule (static, with its
+  bundled Draco) and is built from that checkout.
 - nasm (Texconv JPEG support builds libjpeg-turbo with its SIMD extensions)
 - Network access for first-time dependency and Linux Vulkan SDK downloads
 - UPX, optionally
@@ -67,6 +70,24 @@ upstream OpenEXR PR #2262), and new enough that the vendored deflate no longer
 uses `evex512` target attributes, which GCC 16 rejects (v3.4.2 does not
 compile; v3.4.14 does).
 
+The application links these libraries. CMake downloads each fetched row on the first configure. Assimp is the submodule:
+bcdec and stb_image are the single headers in `third_party/bcdec` and
+`third_party/stb`, used by the cook quality check.
+
+| Dependency | Version | Role |
+| --- | --- | --- |
+| GLFW | 3.4 | window and input |
+| Dear ImGui | v1.92.9b | interface |
+| nlohmann/json | v3.12.0 | settings, materials, validation reports, translations |
+| msgpack-cxx | 7.0.0 | CDAE body |
+| zstd | 1.5.7 | CDAE compression |
+| Assimp | 6.0.5 | model import and export, bundled Draco |
+
+Translations are the JSON files in
+`app/locales/<locale>/main.translation.json` (en-US, pl_PL,
+es_ES, de_DE, it_IT). CMake embeds them in the executable, so a release
+archive carries no separate locale files.
+
 ## Build a release
 
 Set the release version in the `VERSION` file. The build script embeds it in the application window title.
@@ -84,7 +105,6 @@ python build_release.py --windows --x64
 python build_release.py --windows --arm64
 python build_release.py --linux --x64
 python build_release.py --linux --arm64
-python build_release.py --macos --x64
 python build_release.py --macos --arm64
 ```
 
@@ -111,7 +131,7 @@ python build_release.py --skip-vulkan
   `dxc` is missing.
 - If LunarG rejects the Python download, install `curl`; the build retries the
   download through curl with redirects and retries enabled.
-- `--macos` selects macOS targets. macOS builds must run on macOS.
+- `--macos` selects the macOS ARM64 target. macOS builds must run on macOS.
 - `--x64` and `--arm64` select an architecture.
 - Target, cleanup, and compression options can be combined.
 
@@ -240,6 +260,7 @@ Release archives are written to `dist`:
 - `dist/goDragonCooker-windows-arm64.zip`
 - `dist/goDragonCooker-linux-x64.zip`
 - `dist/goDragonCooker-linux-arm64.zip`
+- `dist/goDragonCooker-macos-arm64.zip`
 
 Each Windows, Linux, and macOS archive contains the executable, its matching
 Texconv library, the Compressonator Vulkan library, decoder runtime libraries,
@@ -260,5 +281,5 @@ runtime. On Windows and Linux the driver supplies `vulkan-1.dll` or
 `libvulkan.so.1`; those system loaders are intentionally not packaged. macOS
 has no system Vulkan loader, so the archive includes one. Apple Silicon on
 macOS 26 or newer loads KosmicKrisp when `kosmickrisp_icd.json` is present;
-other Macs load MoltenVK. There is no CPU fallback. The macOS 15 CI runner
+Apple Silicon on earlier macOS loads MoltenVK. There is no CPU fallback. The macOS 15 CI runner
 builds the backend and ships both drivers, and can only execute MoltenVK.
