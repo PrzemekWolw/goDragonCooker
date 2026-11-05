@@ -6,3 +6,6 @@ void cookTabUI();
 
 void matGenTabInit();
 void matGenTabUI();
+
+void modelTabInit();
+void modelTabUI();

@@ -1,5 +1,6 @@
 #include "tabs/tabs.h"
 
+#include <algorithm>
 #include <chrono>
 #include <thread>
 
@@ -10,7 +11,9 @@
 #include "gpu/gpu.h"
 #include "imgui.h"
 #include "imgui_stdlib.h"
+#include "texture/cook_retry.h"
 #include "texture/cook_rules.h"
+#include "texture/cook_validate.h"
 #include "texture/texconv.h"
 #include "texture/vulkan_codec.h"
 #include "ui/theme.h"
@@ -19,20 +22,48 @@
 namespace {
 
 // UI-thread-only fields are plain; runs get copies.
+struct CookValidation {
+    bool validate = false;
+    bool retry = true;
+    CookThresholds thresholds;
+};
+
 struct CookTab {
     TaskState task;
     std::string directory;
     bool autoDetectFmt = true;
+    CookValidation validation;
 };
 
 CookTab cookTab;
+
+struct CookCheck {
+    bool ran = false;
+    CookQuality quality;
+    CookRetry retry;
+};
 
 std::string baseName(const std::string& path)
 {
     return u8str(u8path(path).filename());
 }
 
-void runCooker(std::string directory, bool autoDetectFmt)
+CookCheck checkCook(const CookJob& job, const CookValidation& v, bool firstWasTexconv)
+{
+    CookCheck c;
+    if (!v.validate) {
+        return c;
+    }
+    c.ran = true;
+    c.quality = validateCook(job, ddsPathFor(job), v.thresholds);
+    if (v.retry && c.quality.lowQuality) {
+        c.retry = retryCook(job, c.quality, firstWasTexconv, preferredGPUArgs(), v.thresholds);
+        c.quality = c.retry.quality;
+    }
+    return c;
+}
+
+void runCooker(std::string directory, bool autoDetectFmt, CookValidation validation)
 {
     TaskState& tab = cookTab.task;
     tab.begin("Seeking files...");
@@ -110,14 +141,37 @@ void runCooker(std::string directory, bool autoDetectFmt)
 
     const auto t0 = std::chrono::steady_clock::now();
     size_t done = 0, cooked = 0, failed = 0, batchCount = 0;
-    auto recordResult = [&](const std::string& name, const std::string& error) {
+    size_t validated = 0, passed = 0, warned = 0, qualityFailed = 0, headerOnly = 0;
+    size_t retried = 0, improved = 0, keptOriginal = 0;
+    const bool firstWasTexconv = backend != textureBackendCompressonator;
+    std::vector<CookCheck> checks(jobs.size());
+    auto recordResult = [&](const std::string& name, const std::string& error, const CookCheck& check) {
         ++done;
         if (!error.empty()) {
             tab.log(format("  FAIL: %s - %s", name.c_str(), trim(error).c_str()));
             ++failed;
-        } else {
+        } else if (!check.ran) {
             tab.log(format("  OK: %s", name.c_str()));
             ++cooked;
+        } else {
+            ++cooked;
+            ++validated;
+            const CookVerdict verdict = check.quality.verdict;
+            const char* tag = verdict == CookVerdict::Fail ? "FAIL" : verdict == CookVerdict::Warn ? "WARN" : "OK";
+            tab.log(format("  %s: %s - %s", tag, name.c_str(), describeQuality(check.quality).c_str()));
+            switch (verdict) {
+            case CookVerdict::Ok: ++passed; break;
+            case CookVerdict::HeaderOnly: ++headerOnly; break;
+            case CookVerdict::Warn: ++warned; break;
+            case CookVerdict::Fail: ++qualityFailed; break;
+            }
+            if (!check.retry.note.empty()) {
+                tab.log("    " + check.retry.note);
+            }
+            if (check.retry.attempted) {
+                ++retried;
+                ++(check.retry.improved ? improved : keptOriginal);
+            }
         }
         if (++batchCount >= 16 || done == total) {
             tab.setStatus(format("Cooking: %zu/%zu (%zu cooked, %zu failed)", done, total, cooked, failed));
@@ -130,8 +184,15 @@ void runCooker(std::string directory, bool autoDetectFmt)
         tab.log(format("Cooking %zu files with Compressonator Vulkan (%u GPU workers, %u pipeline workers).", total,
                        vulkanWorkerCount, workers));
         runPool(
-            jobs.size(), workers, tab, [&](size_t i) { return vulkanCompress(jobs[i], vulkanDevice); },
-            [&](size_t i, const std::string& error) { recordResult(baseName(jobs[i].srcFile), error); });
+            jobs.size(), workers, tab,
+            [&](size_t i) {
+                std::string error = vulkanCompress(jobs[i], vulkanDevice);
+                if (error.empty()) {
+                    checks[i] = checkCook(jobs[i], validation, firstWasTexconv);
+                }
+                return error;
+            },
+            [&](size_t i, const std::string& error) { recordResult(baseName(jobs[i].srcFile), error, checks[i]); });
     } else {
         tab.log(format("Cooking %zu files: %zu BC6H/BC7 first, then %zu CPU-batch", total, codecJobs.size(),
                        cpuJobs.size()));
@@ -158,17 +219,27 @@ void runCooker(std::string directory, bool autoDetectFmt)
                     error += "; CPU fallback: " + fallbackError;
                 }
             }
-            recordResult(baseName(job.srcFile), error);
+            const CookCheck check = error.empty() ? checkCook(job, validation, firstWasTexconv) : CookCheck{};
+            recordResult(baseName(job.srcFile), error, check);
         }
 
         if (!cpuJobs.empty()) {
             const unsigned workers =
                 std::max(1u, std::min<unsigned>(std::thread::hardware_concurrency(), unsigned(cpuJobs.size())));
             tab.log(format("Running %zu CPU-batch textures with %u workers.", cpuJobs.size(), workers));
+            std::vector<CookCheck> cpuChecks(cpuJobs.size());
             runPool(
                 cpuJobs.size(), workers, tab,
-                [&](size_t i) { return texconvRun(cookArgs(cpuJobs[i], preferredGPUArgs())); },
-                [&](size_t i, const std::string& error) { recordResult(baseName(cpuJobs[i].srcFile), error); });
+                [&](size_t i) {
+                    std::string error = texconvRun(cookArgs(cpuJobs[i], preferredGPUArgs()));
+                    if (error.empty()) {
+                        cpuChecks[i] = checkCook(cpuJobs[i], validation, firstWasTexconv);
+                    }
+                    return error;
+                },
+                [&](size_t i, const std::string& error) {
+                    recordResult(baseName(cpuJobs[i].srcFile), error, cpuChecks[i]);
+                });
         }
     }
 
@@ -180,6 +251,13 @@ void runCooker(std::string directory, bool autoDetectFmt)
 
     const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     tab.log(format("Finished in %.2fs (%zu/%zu textures cooked, %zu failed)", elapsed, cooked, total, failed));
+    if (validation.validate) {
+        tab.log(format("Validation: %zu validated, %zu passed, %zu warned, %zu failed, %zu header only", validated,
+                       passed, warned, qualityFailed, headerOnly));
+        if (validation.retry) {
+            tab.log(format("Retry: %zu retried, %zu improved, %zu kept original", retried, improved, keptOriginal));
+        }
+    }
     tab.finish(format("Done: %zu/%zu cooked", cooked, total));
 }
 
@@ -280,6 +358,12 @@ ImVec4 cookLogColor(const std::string& line)
     if (hasPrefix(lower, "  fail:") || hasPrefix(lower, "error")) {
         return colCookErr;
     }
+    if (hasPrefix(lower, "  warn:")) {
+        return colWarn;
+    }
+    if (hasPrefix(lower, "    retry")) {
+        return colTextDim;
+    }
     if (hasPrefix(lower, "  skip:")) {
         return colTextDim;
     }
@@ -290,6 +374,58 @@ ImVec4 cookLogColor(const std::string& line)
 
 void cookTabInit()
 {
+    registerSettings(
+        [](const SettingsJson& j) {
+            if (!j.contains("cook") || !j["cook"].is_object()) {
+                return;
+            }
+            const SettingsJson& s = j["cook"];
+            CookValidation& v = cookTab.validation;
+            v.validate = s.value("validate", v.validate);
+            v.retry = s.value("retry", v.retry);
+            v.thresholds.bc7 = s.value("targetBC7", v.thresholds.bc7);
+            v.thresholds.bc5 = s.value("targetBC5", v.thresholds.bc5);
+            v.thresholds.bc4 = s.value("targetBC4", v.thresholds.bc4);
+        },
+        [](SettingsJson& j) {
+            const CookValidation& v = cookTab.validation;
+            j["cook"] = {{"validate", v.validate},
+                         {"retry", v.retry},
+                         {"targetBC7", v.thresholds.bc7},
+                         {"targetBC5", v.thresholds.bc5},
+                         {"targetBC4", v.thresholds.bc4}};
+        });
+}
+
+static void validationControlsUI(CookValidation& v)
+{
+    bool changed = ImGui::Checkbox("Validate after cook", &v.validate);
+    tooltip("Decodes each DDS and compares it with the source: PSNR, max error, SSIM on luma and a per-block check.");
+    ImGui::BeginDisabled(!v.validate);
+    ImGui::Indent();
+    changed |= ImGui::Checkbox("Retry with texconv when quality is low", &v.retry);
+    tooltip("Re-cooks below-target files with texconv into a temporary folder and keeps the retry only if it is at "
+            "least 0.5 dB better.");
+    if (ImGui::TreeNode("Quality targets (PSNR, dB)")) {
+        auto target = [&](const char* label, double* value) {
+            ImGui::SetNextItemWidth(px(140));
+            if (ImGui::InputDouble(label, value, 0.5, 1.0, "%.1f")) {
+                *value = std::clamp(*value, 10.0, 80.0);
+                changed = true;
+            }
+        };
+        target("BC7 color/data", &v.thresholds.bc7);
+        target("BC5 normal", &v.thresholds.bc5);
+        target("BC4 data", &v.thresholds.bc4);
+        ImGui::TextColored(colTextDim, "Below target warns (and retries); %.0f dB lower fails.",
+                           v.thresholds.floorMargin);
+        ImGui::TreePop();
+    }
+    ImGui::Unindent();
+    ImGui::EndDisabled();
+    if (changed) {
+        saveSettings();
+    }
 }
 
 void cookTabUI()
@@ -308,6 +444,7 @@ void cookTabUI()
     ImGui::Separator();
     ImGui::Checkbox("Assume .data textures are grayscale (BC4)", &c.autoDetectFmt);
     tooltip("Data textures will be cooked as grayscale to reduce memory usage regardless of input format mode.");
+    validationControlsUI(c.validation);
     ImGui::Separator();
 
     std::string status;
@@ -325,7 +462,7 @@ void cookTabUI()
         }
     } else if (ImGui::Button("Run Texture Cooker") && !c.directory.empty()) {
         c.task.log("");
-        std::thread(runCooker, c.directory, c.autoDetectFmt).detach();
+        std::thread(runCooker, c.directory, c.autoDetectFmt, c.validation).detach();
     }
     ImGui::Text("Status: %s", status.empty() ? "Waiting..." : status.c_str());
 

@@ -20,6 +20,8 @@
 # Python
 __pycache__/
 *.py[cod]
+/tools/
+/app/tests/
 
 # IDE and OS files
 .vscode/

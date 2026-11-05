@@ -4,3 +4,6 @@
 [submodule "third_party/compressonator"]
 	path = third_party/compressonator
 	url = https://github.com/PrzemekWolw/compressonator.git
+[submodule "third_party/assimp"]
+	path = third_party/assimp
+	url = https://github.com/assimp/assimp.git

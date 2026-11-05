@@ -143,6 +143,7 @@ static void renderUI()
     if (ImGui::BeginTabBar("##tabs")) {
         cookTabUI();
         matGenTabUI();
+        modelTabUI();
         ImGui::EndTabBar();
     }
     ImGui::End();
@@ -155,6 +156,7 @@ int main()
     registerGpuSettings();
     cookTabInit();
     matGenTabInit();
+    modelTabInit();
     loadSettings();
 
     if (!glfwInit()) {
