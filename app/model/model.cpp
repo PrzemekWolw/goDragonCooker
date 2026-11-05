@@ -82,6 +82,123 @@ void restoreOriginalNames(aiScene& scene)
     }
 }
 
+// Assimp's scene copy stops at the first empty UV or colour set, so a mesh whose only set is TEXCOORD set="2"
+// shares that array with the copy, which then frees it. Pack the used sets into 0..n-1.
+template <typename Channels, typename Move>
+std::vector<int> packChannels(Channels& channels, unsigned count, Move move)
+{
+    std::vector<int> remap(count, -1);
+    unsigned next = 0;
+    for (unsigned c = 0; c < count; ++c) {
+        if (channels[c]) {
+            remap[c] = int(next);
+            if (next != c) {
+                move(c, next);
+            }
+            ++next;
+        }
+    }
+    return remap;
+}
+
+void compactChannels(aiScene& scene)
+{
+    for (unsigned m = 0; m < scene.mNumMeshes; ++m) {
+        aiMesh* mesh = scene.mMeshes[m];
+        const std::vector<int> uvMap = packChannels(mesh->mTextureCoords, AI_MAX_NUMBER_OF_TEXTURECOORDS, [&](unsigned from, unsigned to) {
+            mesh->mTextureCoords[to] = mesh->mTextureCoords[from];
+            mesh->mTextureCoords[from] = nullptr;
+            mesh->mNumUVComponents[to] = mesh->mNumUVComponents[from];
+            mesh->mNumUVComponents[from] = 0;
+            if (mesh->mTextureCoordsNames) {
+                std::swap(mesh->mTextureCoordsNames[to], mesh->mTextureCoordsNames[from]);
+            }
+        });
+        packChannels(mesh->mColors, AI_MAX_NUMBER_OF_COLOR_SETS, [&](unsigned from, unsigned to) {
+            mesh->mColors[to] = mesh->mColors[from];
+            mesh->mColors[from] = nullptr;
+        });
+        for (unsigned a = 0; a < mesh->mNumAnimMeshes; ++a) {
+            aiAnimMesh* am = mesh->mAnimMeshes[a];
+            packChannels(am->mTextureCoords, AI_MAX_NUMBER_OF_TEXTURECOORDS, [&](unsigned from, unsigned to) {
+                am->mTextureCoords[to] = am->mTextureCoords[from];
+                am->mTextureCoords[from] = nullptr;
+            });
+            packChannels(am->mColors, AI_MAX_NUMBER_OF_COLOR_SETS, [&](unsigned from, unsigned to) {
+                am->mColors[to] = am->mColors[from];
+                am->mColors[from] = nullptr;
+            });
+        }
+        if (mesh->mMaterialIndex >= scene.mNumMaterials) {
+            continue;
+        }
+        aiMaterial* mat = scene.mMaterials[mesh->mMaterialIndex];
+        for (unsigned p = 0; p < mat->mNumProperties; ++p) {
+            aiMaterialProperty* prop = mat->mProperties[p];
+            if (prop->mType == aiPTI_Integer && prop->mDataLength >= sizeof(int) && std::strcmp(prop->mKey.C_Str(), "$tex.uvwsrc") == 0) {
+                int* v = reinterpret_cast<int*>(prop->mData);
+                if (*v >= 0 && unsigned(*v) < uvMap.size() && uvMap[*v] >= 0) {
+                    *v = uvMap[*v];
+                }
+            }
+        }
+    }
+}
+
+// The game's COLLADA loader shrugs off a few exporter mistakes that Assimp's strict XML parser rejects.
+// Fixes them in place and returns a description of each repair.
+std::vector<std::string> repairCollada(std::string& text)
+{
+    std::vector<std::string> fixes;
+
+    // Empty or missing attributes in the XML declaration (<?xml version="" encoding=""?>).
+    if (text.compare(0, 5, "<?xml") == 0) {
+        const size_t end = text.find("?>");
+        if (end != std::string::npos) {
+            const std::string decl = text.substr(0, end + 2);
+            if (decl.find("version=\"\"") != std::string::npos || decl.find("encoding=\"\"") != std::string::npos) {
+                text.replace(0, end + 2, "<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+                fixes.push_back("empty XML declaration");
+            }
+        }
+    }
+
+    // Further declarations inside the document (a second <?xml ...?> pasted in by a merge).
+    size_t stray = 1;
+    bool strayFound = false;
+    while ((stray = text.find("<?xml", stray)) != std::string::npos) {
+        const size_t end = text.find("?>", stray);
+        if (end == std::string::npos) {
+            break;
+        }
+        text.erase(stray, end + 2 - stray);
+        strayFound = true;
+    }
+    if (strayFound) {
+        fixes.push_back("removed stray XML declaration");
+    }
+
+    // <instance_visual_scene url="#X"/> naming a scene that does not exist: use the file's first visual_scene.
+    const size_t inst = text.find("<instance_visual_scene");
+    if (inst != std::string::npos) {
+        const size_t q1 = text.find("url=\"#", inst);
+        const size_t q2 = q1 == std::string::npos ? q1 : text.find('"', q1 + 6);
+        if (q2 != std::string::npos) {
+            const std::string id = text.substr(q1 + 6, q2 - q1 - 6);
+            if (text.find("<visual_scene id=\"" + id + "\"") == std::string::npos) {
+                const size_t vs = text.find("<visual_scene id=\"");
+                const size_t ve = vs == std::string::npos ? vs : text.find('"', vs + 18);
+                if (ve != std::string::npos) {
+                    const std::string actual = text.substr(vs + 18, ve - vs - 18);
+                    text.replace(q1 + 6, q2 - q1 - 6, actual);
+                    fixes.push_back("scene reference #" + id + " pointed at nothing, using #" + actual);
+                }
+            }
+        }
+    }
+    return fixes;
+}
+
 } // namespace
 
 Model::Model() = default;
@@ -104,9 +221,17 @@ bool Model::load(const std::string& path, std::string& error, std::vector<std::s
     // COLLADA: keep the document's axes and apply the engine's up-axis conversion ourselves.
     UpAxis up = UpAxis::Z;
     const bool collada = ext == ".dae";
+    std::string repaired;
     if (collada) {
         std::ifstream f(fs::u8path(path), std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        const std::vector<std::string> fixes = repairCollada(text);
+        if (!fixes.empty()) {
+            for (const std::string& fix : fixes) {
+                warnings.push_back("COLLADA file repaired: " + fix);
+            }
+            repaired = text;
+        }
         const size_t p = text.find("<up_axis>");
         if (p != std::string::npos) {
             const std::string v = text.substr(p + 9, 16);
@@ -118,7 +243,9 @@ bool Model::load(const std::string& path, std::string& error, std::vector<std::s
     Assimp::Importer importer;
     importer.SetPropertyInteger(AI_CONFIG_IMPORT_COLLADA_IGNORE_UP_DIRECTION, collada ? 1 : 0);
     const unsigned flags = aiProcess_Triangulate | aiProcess_JoinIdenticalVertices | aiProcess_SortByPType;
-    if (!importer.ReadFile(path, flags)) {
+    const aiScene* imported = repaired.empty() ? importer.ReadFile(path, flags)
+                                               : importer.ReadFileFromMemory(repaired.data(), repaired.size(), flags, "dae");
+    if (!imported) {
         error = importer.GetErrorString();
         if (error.empty()) {
             error = "Assimp could not read the file";
@@ -131,6 +258,7 @@ bool Model::load(const std::string& path, std::string& error, std::vector<std::s
         return false;
     }
     restoreOriginalNames(*loadedScene);
+    compactChannels(*loadedScene);
     if (collada && up != UpAxis::Z) {
         loadedScene->mRootNode->mTransformation = upAxisMatrix(up) * loadedScene->mRootNode->mTransformation;
         warnings.push_back(format("COLLADA %s converted to Z-up like the game", up == UpAxis::Y ? "Y_UP" : "X_UP"));

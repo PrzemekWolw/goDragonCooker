@@ -204,6 +204,8 @@ bool writeAssimp(const aiScene& scene, const Format& target, const nlohmann::jso
 {
     Assimp::Exporter exporter;
     Assimp::ExportProperties props;
+    // The default (0.01) drops node transforms that are close to identity, such as a 0.3 mm offset.
+    props.SetPropertyFloat(AI_CONFIG_CHECK_IDENTITY_MATRIX_EPSILON, 0.0f);
     auto setBool = [&](const char* prop, const char* key) {
         if (std::any_of(target.settings.begin(), target.settings.end(), [&](const SettingDef& s) { return s.key == key; })) {
             props.SetPropertyBool(prop, settingBool(target, settings, key));
