@@ -560,14 +560,13 @@ bool writeAssimp(const aiScene& scene, const Format& target, const nlohmann::jso
 
 } // namespace
 
-ts::AiToTsOptions aiToTsOptions(const Format& target, const nlohmann::json& settings, const Model& source)
+ts::AiToTsOptions aiToTsOptions(const Format& target, const nlohmann::json& settings)
 {
     ts::AiToTsOptions o;
     o.lod = ts::LodMode(settingValue(target, settings, "lod"));
     o.singleDetailSize = settingValue(target, settings, "detailSize");
     o.scale = ts::ScaleMode(settingValue(target, settings, "scale"));
     o.exporterVersion = settingValue(target, settings, "exporter") == 1 ? ts::kExporterAssimp : ts::kExporterCollada;
-    o.mergeAnimations = source.wantsMergedAnimations();
     return o;
 }
 
@@ -597,7 +596,7 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
     const ts::Shape* shape = nullptr;
     const aiScene* scene = nullptr;
     if (target.isTs) {
-        shape = source.shape(aiToTsOptions(target, settings, source), r.warnings, r.error);
+        shape = source.shape(aiToTsOptions(target, settings), r.warnings, r.error);
         if (!shape || !writeTs(*shape, target, settings, outputPath, r)) {
             return r;
         }

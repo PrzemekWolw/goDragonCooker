@@ -1,7 +1,9 @@
 #include "model/model.h"
 
+#include <algorithm>
 #include <fstream>
 #include <map>
+#include <set>
 
 #include <assimp/Importer.hpp>
 #include <assimp/config.h>
@@ -19,8 +21,7 @@ namespace {
 
 bool sameOptions(const ts::AiToTsOptions& a, const ts::AiToTsOptions& b)
 {
-    return a.lod == b.lod && a.singleDetailSize == b.singleDetailSize && a.scale == b.scale && a.mergeAnimations == b.mergeAnimations &&
-           a.minFps == b.minFps && a.maxFps == b.maxFps && a.exporterVersion == b.exporterVersion;
+    return a.lod == b.lod && a.singleDetailSize == b.singleDetailSize && a.scale == b.scale && a.minFps == b.minFps && a.maxFps == b.maxFps && a.exporterVersion == b.exporterVersion;
 }
 
 bool sameOptions(const ts::TsToAiOptions& a, const ts::TsToAiOptions& b)
@@ -131,6 +132,37 @@ void compactChannels(aiScene& scene)
     }
 }
 
+// COLLADA without <animation_clip>: the game wraps every <animation> in one cyclic sequence called "ambient",
+// while Assimp reports one aiAnimation per element. The first channel of a node wins.
+void mergeIntoAmbient(aiScene& scene)
+{
+    if (!scene.mNumAnimations) {
+        return;
+    }
+    auto* merged = new aiAnimation;
+    merged->mName = "ambient";
+    merged->mTicksPerSecond = scene.mAnimations[0]->mTicksPerSecond;
+    std::vector<aiNodeAnim*> channels;
+    std::set<std::string> animated;
+    for (unsigned a = 0; a < scene.mNumAnimations; ++a) {
+        aiAnimation* anim = scene.mAnimations[a];
+        merged->mDuration = std::max(merged->mDuration, anim->mDuration);
+        for (unsigned c = 0; c < anim->mNumChannels; ++c) {
+            if (animated.insert(anim->mChannels[c]->mNodeName.C_Str()).second) {
+                channels.push_back(anim->mChannels[c]);
+                anim->mChannels[c] = nullptr;
+            }
+        }
+        delete anim;
+    }
+    delete[] scene.mAnimations;
+    merged->mNumChannels = unsigned(channels.size());
+    merged->mChannels = new aiNodeAnim*[channels.size()];
+    std::copy(channels.begin(), channels.end(), merged->mChannels);
+    scene.mAnimations = new aiAnimation*[1]{merged};
+    scene.mNumAnimations = 1;
+}
+
 // The game's COLLADA loader shrugs off a few exporter mistakes that Assimp's strict XML parser rejects.
 // Fixes them in place and returns a description of each repair.
 std::vector<std::string> repairCollada(std::string& text)
@@ -209,6 +241,7 @@ bool Model::load(const std::string& path, std::string& error, std::vector<std::s
     UpAxis up = UpAxis::Z;
     const bool collada = ext == ".dae";
     std::string repaired;
+    bool mergeAnimations = false;
     if (collada) {
         std::ifstream f(fs::u8path(path), std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -229,6 +262,7 @@ bool Model::load(const std::string& path, std::string& error, std::vector<std::s
 
     Assimp::Importer importer;
     importer.SetPropertyInteger(AI_CONFIG_IMPORT_COLLADA_IGNORE_UP_DIRECTION, collada ? 1 : 0);
+    importer.SetPropertyInteger(AI_CONFIG_IMPORT_COLLADA_USE_COLLADA_NAMES, collada ? 1 : 0);
     const unsigned flags = aiProcess_Triangulate | aiProcess_JoinIdenticalVertices | aiProcess_SortByPType;
     const aiScene* imported = repaired.empty() ? importer.ReadFile(path, flags)
                                                : importer.ReadFileFromMemory(repaired.data(), repaired.size(), flags, "dae");
@@ -246,6 +280,9 @@ bool Model::load(const std::string& path, std::string& error, std::vector<std::s
     }
     restoreOriginalNames(*loadedScene);
     compactChannels(*loadedScene);
+    if (mergeAnimations) {
+        mergeIntoAmbient(*loadedScene);
+    }
     if (collada) {
         if (up != UpAxis::Z) {
             loadedScene->mRootNode->mTransformation = colladaUpToZUp(up) * loadedScene->mRootNode->mTransformation;

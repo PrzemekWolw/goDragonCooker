@@ -28,7 +28,7 @@ struct ConvertResult {
 
 ConvertResult convertModel(Model& source, const std::string& outputPath, const ConvertOptions& options);
 
-ts::AiToTsOptions aiToTsOptions(const Format& target, const nlohmann::json& settings, const Model& source);
+ts::AiToTsOptions aiToTsOptions(const Format& target, const nlohmann::json& settings);
 ts::TsToAiOptions tsToAiOptions(const Format& target, const nlohmann::json& settings);
 
 struct OutputRequest {

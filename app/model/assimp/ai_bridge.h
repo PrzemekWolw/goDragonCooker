@@ -24,8 +24,6 @@ struct AiToTsOptions {
     LodMode lod = LodMode::Auto;
     int singleDetailSize = 2;
     ScaleMode scale = ScaleMode::Auto;
-    // Fold every aiAnimation into one "ambient" sequence (COLLADA without <animation_clip>).
-    bool mergeAnimations = false;
     int minFps = 15;
     int maxFps = 60;
     int exporterVersion = kExporterCollada;

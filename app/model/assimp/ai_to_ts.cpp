@@ -791,18 +791,6 @@ struct Converter {
                 clips.push_back(std::move(clip));
             }
         }
-        if (opt.mergeAnimations && clips.size() > 1) {
-            Clip merged;
-            merged.name = "ambient";
-            for (Clip& c : clips) {
-                merged.byNode.insert(c.byNode.begin(), c.byNode.end());
-                merged.morphs.insert(c.morphs.begin(), c.morphs.end());
-                merged.endTime = std::max(merged.endTime, c.endTime);
-                merged.minKeyDelta = std::min(merged.minKeyDelta, c.minKeyDelta);
-            }
-            clips.clear();
-            clips.push_back(std::move(merged));
-        }
         return clips;
     }
 
