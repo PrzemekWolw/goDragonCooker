@@ -339,6 +339,47 @@ def run(
     return result
 
 
+X86_64_V3 = True
+ARCH_STAMP_DIR = PROJECT / ".build" / "arch"
+
+
+def cpu_flags(target: dict) -> str:
+    """CPU baseline flags for code built outside the app's CMake project (Texconv)."""
+    msvc = target["platform"] == "windows" and platform.system() == "Windows"
+    if target["goarch"] == "amd64" and X86_64_V3:
+        return "/arch:AVX2" if msvc else "-march=x86-64-v3 -ffp-contract=off"
+    if target["goarch"] == "arm64" and msvc:
+        return "/arch:armv8.2"
+    return ""
+
+
+def cpu_flags_env(target: dict) -> dict[str, str]:
+    flags = cpu_flags(target)
+    if not flags:
+        return {}
+    if target["platform"] == "windows" and platform.system() == "Windows":
+        return {"CL": " ".join(filter(None, [os.environ.get("CL", ""), flags]))}
+    return {
+        "CFLAGS": " ".join(filter(None, [os.environ.get("CFLAGS", ""), flags])),
+        "CXXFLAGS": " ".join(filter(None, [os.environ.get("CXXFLAGS", ""), flags])),
+    }
+
+
+def arch_stamp(kind: str, target: dict) -> Path:
+    return ARCH_STAMP_DIR / f"{kind}-{target['name']}.txt"
+
+
+def arch_stamp_matches(kind: str, target: dict, value: str) -> bool:
+    stamp = arch_stamp(kind, target)
+    return stamp.is_file() and stamp.read_text(encoding="utf-8") == value
+
+
+def write_arch_stamp(kind: str, target: dict, value: str):
+    stamp = arch_stamp(kind, target)
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(value, encoding="utf-8")
+
+
 def needs_build(binary: Path, sources: list[Path]) -> bool:
     if not binary.exists():
         return True
@@ -656,11 +697,24 @@ def build_texconv_target(target: dict):
     source_binary = TEXCONV_SOURCE / target["texconv_lib"]
     destination = texconv_library(target)
     texconv_source = TEXCONV_SOURCE / "TexconvDLL" / "texconv.cpp"
-    if destination.exists() and not needs_build(destination, [texconv_source]):
+    flags = cpu_flags(target)
+    if (
+        destination.exists()
+        and not needs_build(destination, [texconv_source])
+        and arch_stamp_matches("texconv", target, flags)
+    ):
         log(f"Skipping Texconv {target['name']} (up to date)")
         return
 
     architecture = "arm64" if target["goarch"] == "arm64" else "x64"
+    # The flags come from the environment, which neither MSBuild nor a configured CMake cache
+    # tracks, so a baseline change needs a fresh build directory.
+    texconv_build_dir = TEXCONV_SOURCE / f"build_{architecture}"
+    if texconv_build_dir.exists() and not arch_stamp_matches("texconv", target, flags):
+        log(f"  Removing {texconv_build_dir.name} built with other CPU flags")
+        shutil.rmtree(texconv_build_dir)
+    if flags:
+        log(f"  Texconv CPU flags: {flags}")
     gpu_mode = "with GPU codec" if target["platform"] == "windows" else "without GPU codec"
     log(f"Building Texconv {target['name']} {gpu_mode}...")
     if platform.system() == "Windows":
@@ -675,7 +729,7 @@ def build_texconv_target(target: dict):
             visual_studio_generator(),
         ]
         command.extend(["--architecture", architecture])
-        build_result = run(command, cwd=TEXCONV_SOURCE)
+        build_result = run(command, cwd=TEXCONV_SOURCE, env=cpu_flags_env(target))
     else:
         build_script = TEXCONV_SOURCE / "scripts" / "build.sh"
         with tempfile.NamedTemporaryFile(
@@ -699,11 +753,14 @@ def build_texconv_target(target: dict):
                     architecture,
                 ],
                 cwd=TEXCONV_SOURCE,
-                env=(
-                    linux_compiler_env(target)
-                    if target["platform"] == "linux"
-                    else darwin_compiler_env(target)
-                ),
+                env={
+                    **(
+                        linux_compiler_env(target)
+                        if target["platform"] == "linux"
+                        else darwin_compiler_env(target)
+                    ),
+                    **cpu_flags_env(target),
+                },
             )
         finally:
             normalized_script.unlink(missing_ok=True)
@@ -725,6 +782,7 @@ def build_texconv_target(target: dict):
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(str(source_binary), str(destination))
+    write_arch_stamp("texconv", target, flags)
     log(f"Installed {destination}")
 
 
@@ -1016,6 +1074,7 @@ def app_cmake_command(target: dict) -> tuple[list[str], dict[str, str], Path]:
             command += [f"-DCMAKE_C_COMPILER={env['CC']}", f"-DCMAKE_CXX_COMPILER={env['CXX']}"]
 
     command.append("-DCMAKE_BUILD_TYPE=Release")
+    command.append(f"-DGDC_X86_64_V3={'ON' if X86_64_V3 else 'OFF'}")
     return command, env, build_dir
 
 
@@ -1023,7 +1082,8 @@ def build_target(target: dict, upx: bool, upx_threads: bool, sources: list[Path]
     name = target["name"]
     binary = binary_path(target)
 
-    if not needs_build(binary, sources):
+    baseline = f"x86-64-v3={X86_64_V3}"
+    if not needs_build(binary, sources) and arch_stamp_matches("app", target, baseline):
         log(f"Skipping {name} (up to date)")
         return
     if not shutil.which("cmake"):
@@ -1073,6 +1133,7 @@ def build_target(target: dict, upx: bool, upx_threads: bool, sources: list[Path]
         shutil.move(str(tmp_binary), str(binary))
         binary.chmod(0o755)
         BINARY_BUILD_OUTPUTS[name] = binary
+        write_arch_stamp("app", target, baseline)
         log(f"Built {binary.name} ({after_mb:.1f} MB)")
     except PermissionError:
         BINARY_BUILD_OUTPUTS[name] = tmp_binary
@@ -1161,7 +1222,15 @@ def main():
     p.add_argument("--no-upx", action="store_true", help="Skip UPX compression")
     p.add_argument("--skip-texconv", action="store_true", help="Use existing Texconv libraries")
     p.add_argument("--skip-vulkan", action="store_true", help="Use existing Compressonator Vulkan libraries")
+    p.add_argument(
+        "--no-x86-64-v3",
+        action="store_true",
+        help="Build x64 targets for the baseline x86-64 CPU instead of x86-64-v3 (AVX2)",
+    )
     args = p.parse_args()
+
+    global X86_64_V3
+    X86_64_V3 = not args.no_x86_64_v3
 
     if args.clean:
         clean()

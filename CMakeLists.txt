@@ -11,6 +11,49 @@ endif()
 
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" APP_VERSION LIMIT_COUNT 1)
 
+# CPU baseline. x64 requires x86-64-v3 (AVX2, FMA, BMI2); Windows ARM64 requires armv8.2
+# (the Windows 11 on ARM floor); Linux ARM64 stays armv8-a and macOS stays apple-m1.
+if(MSVC)
+    string(TOLOWER "${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}" GDC_CPU)
+elseif(CMAKE_OSX_ARCHITECTURES)
+    string(TOLOWER "${CMAKE_OSX_ARCHITECTURES}" GDC_CPU)
+else()
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" GDC_CPU)
+endif()
+set(GDC_X64 OFF)
+if(GDC_CPU MATCHES "^(x86_64|amd64|x64)$")
+    set(GDC_X64 ON)
+endif()
+option(GDC_X86_64_V3 "Require x86-64-v3 (AVX2, FMA, BMI2) on x64" ${GDC_X64})
+if(NOT GDC_X64)
+    set(GDC_X86_64_V3 OFF)
+endif()
+
+# Built before the global arch flags so it can still report a missing feature on an older CPU.
+add_library(gdc_cpu_check OBJECT app/core/cpu_check.cpp)
+if(GDC_X86_64_V3)
+    target_compile_definitions(gdc_cpu_check PRIVATE GDC_REQUIRE_X86_64_V3)
+endif()
+
+if(GDC_X86_64_V3)
+    if(MSVC)
+        add_compile_options(/arch:AVX2)
+    else()
+        add_compile_options(-march=x86-64-v3)
+        if(MINGW)
+            # GCC does not keep the Win64 stack 32-byte aligned for AVX spills (GCC bug 54412).
+            add_compile_options(-Wa,-muse-unaligned-vector-move)
+        endif()
+    endif()
+elseif(MSVC AND GDC_CPU STREQUAL "arm64")
+    add_compile_options(/arch:armv8.2)
+endif()
+if(NOT MSVC)
+    # Keep float results identical to MSVC /fp:precise (no fused multiply-add).
+    add_compile_options(-ffp-contract=off)
+endif()
+message(STATUS "goDragonCooker CPU: ${GDC_CPU}, x86-64-v3: ${GDC_X86_64_V3}")
+
 include(FetchContent)
 
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -89,7 +132,21 @@ target_include_directories(gdc_headers SYSTEM INTERFACE
 find_package(OpenGL REQUIRED)
 find_package(Threads REQUIRED)
 
-# Warnings and platform defines shared by every first-party target.
+# Release optimizations for first-party targets only; dependencies keep their own flags.
+# Subdirectories copied CMAKE_<LANG>_FLAGS_RELEASE when they were added, so this only reaches
+# targets defined in this file.
+include(CheckIPOSupported)
+check_ipo_supported(RESULT GDC_IPO_SUPPORTED OUTPUT GDC_IPO_ERROR LANGUAGES C CXX)
+if(NOT GDC_IPO_SUPPORTED)
+    message(STATUS "Link-time optimization unavailable: ${GDC_IPO_ERROR}")
+endif()
+if(MSVC)
+    foreach(lang C CXX)
+        string(REPLACE "/Ob2" "/Ob3" CMAKE_${lang}_FLAGS_RELEASE "${CMAKE_${lang}_FLAGS_RELEASE}")
+    endforeach()
+endif()
+
+# Warnings, platform defines and optimizations shared by every first-party target.
 function(gdc_target_options target)
     target_include_directories(${target} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/app")
     if(WIN32)
@@ -97,9 +154,22 @@ function(gdc_target_options target)
     endif()
     if(MSVC)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
-        target_compile_options(${target} PRIVATE /W4 /utf-8)
+        target_compile_options(${target} PRIVATE /W4 /utf-8 $<$<CONFIG:Release>:/Gw>)
     else()
-        target_compile_options(${target} PRIVATE -Wall -Wextra)
+        target_compile_options(${target} PRIVATE -Wall -Wextra
+            $<$<CONFIG:Release>:-ffunction-sections -fdata-sections>)
+    endif()
+    if(GDC_IPO_SUPPORTED)
+        set_property(TARGET ${target} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    endif()
+    get_target_property(type ${target} TYPE)
+    if(type STREQUAL "EXECUTABLE")
+        target_link_libraries(${target} PRIVATE gdc_cpu_check)
+        if(APPLE)
+            target_link_options(${target} PRIVATE $<$<CONFIG:Release>:-Wl,-dead_strip>)
+        elseif(NOT MSVC)
+            target_link_options(${target} PRIVATE $<$<CONFIG:Release>:-Wl,--gc-sections>)
+        endif()
     endif()
 endfunction()
 

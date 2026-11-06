@@ -120,9 +120,14 @@ Other options:
 python build_release.py --no-upx
 python build_release.py --skip-texconv
 python build_release.py --skip-vulkan
+python build_release.py --no-x86-64-v3
 ```
 
 - `--no-upx` disables UPX compression.
+- `--no-x86-64-v3` builds the x64 app and Texconv for any x86-64 CPU instead of
+  x86-64-v3 (AVX2, FMA, BMI2). With plain CMake, pass `-DGDC_X86_64_V3=OFF`.
+  Windows ARM64 always targets ARMv8.2; Linux ARM64 and macOS keep the
+  compiler defaults. Release builds of the app use link-time optimization.
 - `--skip-texconv` uses existing libraries from `bin` instead of building Texconv.
 - `--skip-vulkan` uses existing Compressonator Vulkan libraries and shaders from `bin`.
 - On Linux, omit `--skip-vulkan` to automatically download and cache the LunarG

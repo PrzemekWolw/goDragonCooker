@@ -3,6 +3,11 @@
 [![Build](https://github.com/PrzemekWolw/goDragonCooker/actions/workflows/build.yml/badge.svg)](https://github.com/PrzemekWolw/goDragonCooker/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/PrzemekWolw/goDragonCooker)](https://github.com/PrzemekWolw/goDragonCooker/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/PrzemekWolw/goDragonCooker/total)](https://github.com/PrzemekWolw/goDragonCooker/releases)
+[![License](https://img.shields.io/github/license/PrzemekWolw/goDragonCooker)](https://github.com/PrzemekWolw/goDragonCooker/blob/master/LICENSE)
+[![Windows](https://img.shields.io/badge/Windows-x64%20%7C%20ARM64-0078D6?logo=windows&logoColor=white)](https://github.com/PrzemekWolw/goDragonCooker/releases)
+[![Linux](https://img.shields.io/badge/Linux-x64%20%7C%20ARM64-FCC624?logo=linux&logoColor=black)](https://github.com/PrzemekWolw/goDragonCooker/releases)
+[![macOS](https://img.shields.io/badge/macOS-ARM64-000000?logo=apple&logoColor=white)](https://github.com/PrzemekWolw/goDragonCooker/releases)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)](https://github.com/PrzemekWolw/goDragonCooker/blob/master/CMakeLists.txt)
 [![VirusTotal](https://img.shields.io/badge/VirusTotal-submitted-394eff?logo=virustotal&logoColor=white)](https://github.com/PrzemekWolw/goDragonCooker/actions/workflows/build.yml)
 
 goDragonCooker is a desktop utility for preparing BeamNG textures, materials, and models.
@@ -59,6 +64,10 @@ BMP, TGA, HDR, TIFF, and EXR sources.
 - Windows x64 and ARM64: Compressonator Vulkan and Texconv.
 - Linux x64 and ARM64: Compressonator Vulkan and Texconv.
 - macOS ARM64: Compressonator Vulkan via MoltenVK or KosmicKrisp and Texconv.
+
+x64 releases need an x86-64-v3 CPU (AVX2, FMA, BMI2): Intel Haswell (2013),
+AMD Zen (2017), or newer. Windows ARM64 releases need ARMv8.2, which every
+Windows 11 on ARM device has.
 
 See [BUILD.md](BUILD.md) for build instructions.
 
