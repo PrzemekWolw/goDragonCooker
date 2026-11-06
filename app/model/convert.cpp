@@ -563,6 +563,7 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
         checkUpAxis(r.report, writerFrame(target.id).up, readRawFrame(outputPath), before);
         if (writtenScene && scene) {
             checkGameLod(r.report, target.id, *writtenScene, *scene, caps.hierarchy);
+            checkSeams(r.report, *writtenScene, *scene, toleranceFor(target, settings).posRel);
         }
     }
     r.validated = true;

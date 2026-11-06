@@ -46,6 +46,8 @@ void checkUpAxis(ValidationReport& report, UpAxis expected, const RawFrame& raw,
 // extra ROOT parent the game inserts.
 void checkGameLod(ValidationReport& report, const std::string& formatId, const aiScene& written, const aiScene& source, bool hierarchy);
 
+void checkSeams(ValidationReport& report, const aiScene& written, const aiScene& source, double posRel);
+
 Capabilities intersect(const Capabilities& a, const Capabilities& b);
 
 } // namespace model

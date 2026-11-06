@@ -192,7 +192,45 @@ struct Encoded {
     size_t faces = 0;
 };
 
-bool encodePrimitive(const Document& doc, const json& prim, const DracoOptions& o, Encoded& enc)
+struct PosGrid {
+    float origin[3] = {0, 0, 0};
+    float range = 0;
+};
+
+PosGrid meshPosGrid(const Document& doc, const json& mesh)
+{
+    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    for (const json& p : mesh.value("primitives", json::array())) {
+        const json attrs = p.value("attributes", json::object());
+        if (!attrs.contains("POSITION")) {
+            continue;
+        }
+        const json& acc = doc.gltf["accessors"][attrs["POSITION"].get<size_t>()];
+        std::vector<uint8_t> bytes;
+        size_t elemSize = 0;
+        if (acc.value("componentType", 0) != 5126 || acc.value("type", std::string()) != "VEC3" || !accessorBytes(doc, acc, bytes, elemSize)) {
+            continue;
+        }
+        for (size_t i = 0; i + 12 <= bytes.size(); i += 12) {
+            float v[3];
+            std::memcpy(v, &bytes[i], 12);
+            for (int k = 0; k < 3; ++k) {
+                lo[k] = std::min(lo[k], v[k]);
+                hi[k] = std::max(hi[k], v[k]);
+            }
+        }
+    }
+    PosGrid g;
+    for (int k = 0; k < 3; ++k) {
+        if (lo[k] <= hi[k]) {
+            g.origin[k] = lo[k];
+            g.range = std::max(g.range, hi[k] - lo[k]);
+        }
+    }
+    return g;
+}
+
+bool encodePrimitive(const Document& doc, const json& prim, const DracoOptions& o, const PosGrid& grid, Encoded& enc)
 {
     const json& accessors = doc.gltf["accessors"];
     const json& attrs = prim["attributes"];
@@ -293,7 +331,12 @@ bool encodePrimitive(const Document& doc, const json& prim, const DracoOptions& 
     encoder.SetSpeedOptions(speed, speed);
     encoder.SetEncodingMethod(draco::MESH_EDGEBREAKER_ENCODING);
     for (const auto& [id, bits] : quant) {
-        if (bits > 0) {
+        if (bits <= 0) {
+            continue;
+        }
+        if (mesh.attribute(id)->attribute_type() == draco::GeometryAttribute::POSITION && grid.range > 0) {
+            encoder.SetAttributeExplicitQuantization(id, bits, 3, grid.origin, grid.range);
+        } else {
             encoder.SetAttributeQuantization(id, bits);
         }
     }
@@ -382,22 +425,33 @@ bool dracoCompressGltf(const std::string& path, const DracoOptions& options, std
         if (!m.contains("primitives")) {
             continue;
         }
-        for (json& p : m["primitives"]) {
-            ++total;
-            if (p.value("mode", 4) != 4 || p.contains("targets") || (p.contains("extensions") && p["extensions"].contains(kExt))) {
+        const PosGrid grid = meshPosGrid(doc, m);
+        total += m["primitives"].size();
+        // All triangle primitives of a mesh or none: a raw one next to quantized ones no longer lines up with them.
+        // Lines and points stay raw; Draco only encodes triangles.
+        std::vector<std::pair<size_t, Encoded>> encoded;
+        bool all = true;
+        for (size_t pi = 0; pi < m["primitives"].size() && all; ++pi) {
+            const json& p = m["primitives"][pi];
+            if (p.value("mode", 4) != 4) {
                 continue;
             }
-            bool exclusive = true;
+            bool ok = !p.contains("targets") && !(p.contains("extensions") && p["extensions"].contains(kExt));
             for (const auto& a : p["attributes"].items()) {
-                exclusive = exclusive && uses[a.value().get<size_t>()] == 1;
+                ok = ok && uses[a.value().get<size_t>()] == 1;
             }
             if (p.contains("indices")) {
-                exclusive = exclusive && uses[p["indices"].get<size_t>()] == 1;
+                ok = ok && uses[p["indices"].get<size_t>()] == 1;
             }
             Encoded enc;
-            if (!exclusive || !encodePrimitive(doc, p, options, enc)) {
-                continue;
-            }
+            all = ok && encodePrimitive(doc, p, options, grid, enc);
+            encoded.push_back({pi, std::move(enc)});
+        }
+        if (!all) {
+            continue;
+        }
+        for (auto& [pi, enc] : encoded) {
+            json& p = m["primitives"][pi];
             for (const auto& a : p["attributes"].items()) {
                 json& acc = g["accessors"][a.value().get<size_t>()];
                 acc.erase("bufferView");
