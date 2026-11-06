@@ -1153,7 +1153,7 @@ bool compressWithWorker(
         || !ensureBuffer(
             context,
             worker.dummy,
-            std::max<VkDeviceSize>(32, levelInfo[0].storageSize * 2),
+            std::max<VkDeviceSize>(32, levelInfo[0].storageSize),
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             hostMemory,
             true,
@@ -1205,25 +1205,6 @@ bool compressWithWorker(
             &values,
             sizeof(values));
 
-        const uint32_t sourceLevelWidth =
-            level == 0 ? sourceWidth : levelInfo[level - 1].width;
-        const uint32_t sourceLevelHeight =
-            level == 0 ? sourceHeight : levelInfo[level - 1].height;
-        uint32_t mipFlags = flags;
-        if (flags & GDC_FLAG_IGNORE_SRGB)
-            mipFlags &= ~(GDC_FLAG_INPUT_SRGB | GDC_FLAG_OUTPUT_SRGB);
-        else if (level > 0) {
-            mipFlags &= ~GDC_FLAG_INPUT_SRGB;
-            if (flags & GDC_FLAG_OUTPUT_SRGB)
-                mipFlags |= GDC_FLAG_INPUT_SRGB;
-        }
-        const MipConstants mipValues{
-            sourceLevelWidth, sourceLevelHeight, info.width, info.height, mipFlags};
-        std::memcpy(
-            static_cast<uint8_t*>(worker.mipConstants.mapped) + mipConstantsStride * level,
-            &mipValues,
-            sizeof(mipValues));
-
         const VkDescriptorBufferInfo constantsInfo{
             worker.constants.buffer, constantsStride * level, sizeof(Constants)};
         const VkDescriptorImageInfo imageInfo{
@@ -1249,6 +1230,25 @@ bool compressWithWorker(
             nullptr, &outputInfo, nullptr};
         vkUpdateDescriptorSets(
             context.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+        const uint32_t sourceLevelWidth =
+            level == 0 ? sourceWidth : levelInfo[level - 1].width;
+        const uint32_t sourceLevelHeight =
+            level == 0 ? sourceHeight : levelInfo[level - 1].height;
+        uint32_t mipFlags = flags;
+        if (flags & GDC_FLAG_IGNORE_SRGB)
+            mipFlags &= ~(GDC_FLAG_INPUT_SRGB | GDC_FLAG_OUTPUT_SRGB);
+        else if (level > 0) {
+            mipFlags &= ~GDC_FLAG_INPUT_SRGB;
+            if (flags & GDC_FLAG_OUTPUT_SRGB)
+                mipFlags |= GDC_FLAG_INPUT_SRGB;
+        }
+        const MipConstants mipValues{
+            sourceLevelWidth, sourceLevelHeight, info.width, info.height, mipFlags};
+        std::memcpy(
+            static_cast<uint8_t*>(worker.mipConstants.mapped) + mipConstantsStride * level,
+            &mipValues,
+            sizeof(mipValues));
 
         const VkDescriptorBufferInfo mipConstantsInfo{
             worker.mipConstants.buffer, mipConstantsStride * level, sizeof(MipConstants)};

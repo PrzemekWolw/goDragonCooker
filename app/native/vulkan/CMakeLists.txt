@@ -88,15 +88,16 @@ else()
                 -fvk-b-shift 0 0 -fvk-t-shift 1 0 -fvk-u-shift 3 0
                 -I "${COMPRESSONATOR_SHADERS}"
                 -Fo "${output}" "${source}"
-            DEPENDS "${source}"
+            DEPENDS "${source}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/clamp_input.h"
             VERBATIM)
         set(SHADER_OUTPUTS ${SHADER_OUTPUTS} "${output}" PARENT_SCOPE)
     endfunction()
 
-    add_bcn_shader(bc4 "${COMPRESSONATOR_SHADERS}/bc4_encode_kernel.hlsl")
-    add_bcn_shader(bc5 "${COMPRESSONATOR_SHADERS}/bc5_encode_kernel.hlsl")
-    add_bcn_shader(bc6 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/bc6_vulkan.hlsl")
-    add_bcn_shader(bc7 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/bc7_vulkan.hlsl")
+    set(shaders "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+    add_bcn_shader(bc4 "${shaders}/bc4_vulkan.hlsl")
+    add_bcn_shader(bc5 "${shaders}/bc5_vulkan.hlsl")
+    add_bcn_shader(bc6 "${shaders}/bc6_vulkan.hlsl")
+    add_bcn_shader(bc7 "${shaders}/bc7_vulkan.hlsl")
     add_bcn_shader(mipmap "${CMAKE_CURRENT_SOURCE_DIR}/shaders/mipmap.hlsl" GenerateMip)
 endif()
 add_custom_target(gdc_vulkan_shaders ALL DEPENDS ${SHADER_OUTPUTS})
