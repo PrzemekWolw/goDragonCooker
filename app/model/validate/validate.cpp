@@ -2,11 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+
+#include <assimp/scene.h>
 
 #include "core/strings.h"
 
@@ -386,6 +389,127 @@ void checkUpAxis(ValidationReport& rep, UpAxis expected, const RawFrame& raw, co
     line(v, text);
     j["verdict"] = verdictName(v);
     rep.json["verdict"] = verdictName(rep.verdict);
+}
+
+namespace {
+
+bool startsWithCi(const char* name, const char* prefix)
+{
+    return hasPrefix(toLower(name ? name : ""), prefix);
+}
+
+bool childStartsWith(const aiNode* node, const char* prefix)
+{
+    if (!node) {
+        return false;
+    }
+    for (unsigned i = 0; i < node->mNumChildren; ++i) {
+        if (startsWithCi(node->mChildren[i]->mName.C_Str(), prefix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// base* with a start* child: the shape the game treats as multi-detail.
+bool lodAnchor(const aiNode* node)
+{
+    if (!node) {
+        return false;
+    }
+    for (unsigned i = 0; i < node->mNumChildren; ++i) {
+        const aiNode* child = node->mChildren[i];
+        if (startsWithCi(child->mName.C_Str(), "base") && childStartsWith(child, "start")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool treeHasLodAnchor(const aiNode* node)
+{
+    if (!node) {
+        return false;
+    }
+    if (lodAnchor(node)) {
+        return true;
+    }
+    for (unsigned i = 0; i < node->mNumChildren; ++i) {
+        if (treeHasLodAnchor(node->mChildren[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void collectMeshNodes(const aiNode* node, std::set<std::string>& out)
+{
+    if (!node) {
+        return;
+    }
+    if (node->mNumMeshes) {
+        out.insert(toLower(node->mName.C_Str()));
+    }
+    for (unsigned i = 0; i < node->mNumChildren; ++i) {
+        collectMeshNodes(node->mChildren[i], out);
+    }
+}
+
+} // namespace
+
+void checkGameLod(ValidationReport& report, const std::string& formatId, const aiScene& written, const aiScene& source, bool hierarchy)
+{
+    if (!hierarchy || !treeHasLodAnchor(source.mRootNode)) {
+        return;
+    }
+    const aiNode* root = written.mRootNode;
+    bool detected = false;
+    const char* seen = root ? root->mName.C_Str() : "";
+    if ((formatId == "gltf2" || formatId == "gltf1") && std::strcmp(seen, "ROOT") != 0) {
+        // The game inserts ROOT above a glTF root that is not already named that, then looks one level down.
+        detected = root && startsWithCi(seen, "base") && childStartsWith(root, "start");
+    } else {
+        detected = lodAnchor(root);
+    }
+    auto raise = [&](Verdict v) {
+        if (int(v) > int(report.verdict)) {
+            report.verdict = v;
+        }
+    };
+    report.json["lod"] = {{"source", true}, {"detected", detected}};
+    if (!detected) {
+        raise(Verdict::Fail);
+        report.lines.push_back(format(
+            "FAIL LOD: game does not see base/start under '%s'. Detail names fall back to size 2, so nulldetail hides the meshes.",
+            seen[0] ? seen : "(none)"));
+    } else {
+        report.lines.push_back("LOD: base/start is where the game looks for detail levels");
+    }
+
+    std::set<std::string> want, got;
+    collectMeshNodes(source.mRootNode, want);
+    collectMeshNodes(written.mRootNode, got);
+    std::vector<std::string> missing;
+    for (const std::string& name : want) {
+        if (!got.count(name) && missing.size() < 4) {
+            missing.push_back(name);
+        }
+    }
+    const size_t missingCount = want.size() - std::count_if(want.begin(), want.end(), [&](const std::string& n) { return got.count(n) != 0; });
+    report.json["lod"]["meshNodes"] = want.size();
+    report.json["lod"]["meshNodesFound"] = want.size() - missingCount;
+    if (missingCount) {
+        raise(Verdict::Fail);
+        std::string text = format("FAIL LOD: %zu mesh node name(s) lost", missingCount);
+        for (const std::string& m : missing) {
+            text += " " + m;
+        }
+        if (missingCount > missing.size()) {
+            text += " ...";
+        }
+        report.lines.push_back(text);
+    }
+    report.json["verdict"] = verdictName(report.verdict);
 }
 
 ValidationReport compareSummaries(const Summary& src, const Summary& dst, const Capabilities& caps, const Tolerance& tol)

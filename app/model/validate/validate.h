@@ -42,6 +42,10 @@ ValidationReport compareSummaries(const Summary& source, const Summary& result, 
 
 void checkUpAxis(ValidationReport& report, UpAxis expected, const RawFrame& raw, const Summary& source);
 
+// `written` is the scene Assimp produces when it reads the file back. glTF also accounts for the
+// extra ROOT parent the game inserts.
+void checkGameLod(ValidationReport& report, const std::string& formatId, const aiScene& written, const aiScene& source, bool hierarchy);
+
 Capabilities intersect(const Capabilities& a, const Capabilities& b);
 
 } // namespace model

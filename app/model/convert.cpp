@@ -1,6 +1,7 @@
 #include "model/convert.h"
 
 #include <algorithm>
+#include <cstring>
 #include <map>
 #include <set>
 #include <system_error>
@@ -124,6 +125,161 @@ aiScene* gltfScene(const aiScene& in)
     };
     walk(walk, copy->mRootNode);
     return copy;
+}
+
+bool startsWithCi(const char* name, const char* prefix)
+{
+    return hasPrefix(toLower(name ? name : ""), prefix);
+}
+
+bool childStartsWith(const aiNode* node, const char* prefix)
+{
+    for (unsigned i = 0; i < node->mNumChildren; ++i) {
+        if (startsWithCi(node->mChildren[i]->mName.C_Str(), prefix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool lodAnchor(const aiNode* node)
+{
+    if (!node) {
+        return false;
+    }
+    for (unsigned i = 0; i < node->mNumChildren; ++i) {
+        const aiNode* child = node->mChildren[i];
+        if (startsWithCi(child->mName.C_Str(), "base") && childStartsWith(child, "start")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::set<std::string> referencedNodeNames(const aiScene& scene)
+{
+    std::set<std::string> names;
+    for (unsigned m = 0; m < scene.mNumMeshes; ++m) {
+        const aiMesh* mesh = scene.mMeshes[m];
+        for (unsigned b = 0; b < mesh->mNumBones; ++b) {
+            names.insert(mesh->mBones[b]->mName.C_Str());
+        }
+    }
+    for (unsigned a = 0; a < scene.mNumAnimations; ++a) {
+        const aiAnimation* anim = scene.mAnimations[a];
+        for (unsigned c = 0; c < anim->mNumChannels; ++c) {
+            names.insert(anim->mChannels[c]->mNodeName.C_Str());
+        }
+    }
+    return names;
+}
+
+void renameReferences(aiScene& scene, const std::string& from, const char* to)
+{
+    auto fix = [&](aiString& s) {
+        if (from == s.C_Str()) {
+            s = to;
+        }
+    };
+    for (unsigned m = 0; m < scene.mNumMeshes; ++m) {
+        for (unsigned b = 0; b < scene.mMeshes[m]->mNumBones; ++b) {
+            fix(scene.mMeshes[m]->mBones[b]->mName);
+        }
+    }
+    for (unsigned a = 0; a < scene.mNumAnimations; ++a) {
+        aiAnimation* anim = scene.mAnimations[a];
+        for (unsigned c = 0; c < anim->mNumChannels; ++c) {
+            fix(anim->mChannels[c]->mNodeName);
+        }
+    }
+}
+
+bool collapseLodWrapper(aiNode* parent, const std::set<std::string>& referenced)
+{
+    std::vector<aiNode*> kept;
+    bool changed = false;
+    for (unsigned i = 0; i < parent->mNumChildren; ++i) {
+        aiNode* child = parent->mChildren[i];
+        const bool wrapper = !child->mNumMeshes && child->mNumChildren && lodAnchor(child) &&
+                             !startsWithCi(child->mName.C_Str(), "base") && !startsWithCi(child->mName.C_Str(), "start") &&
+                             !referenced.count(child->mName.C_Str());
+        if (!wrapper) {
+            kept.push_back(child);
+            continue;
+        }
+        const aiMatrix4x4 xf = child->mTransformation;
+        const unsigned n = child->mNumChildren;
+        aiNode** grand = child->mChildren;
+        child->mChildren = nullptr;
+        child->mNumChildren = 0;
+        for (unsigned g = 0; g < n; ++g) {
+            grand[g]->mParent = parent;
+            grand[g]->mTransformation = xf * grand[g]->mTransformation;
+            kept.push_back(grand[g]);
+        }
+        delete[] grand;
+        delete child;
+        changed = true;
+    }
+    if (!changed) {
+        return false;
+    }
+    delete[] parent->mChildren;
+    parent->mNumChildren = unsigned(kept.size());
+    parent->mChildren = kept.empty() ? nullptr : new aiNode*[kept.size()];
+    for (size_t i = 0; i < kept.size(); ++i) {
+        parent->mChildren[i] = kept[i];
+        kept[i]->mParent = parent;
+    }
+    return true;
+}
+
+bool lodAnchorNeeded(const aiScene& scene, const std::string& formatId)
+{
+    const aiNode* root = scene.mRootNode;
+    if (!root) {
+        return false;
+    }
+    const bool gltf = formatId == "gltf2" || formatId == "gltf1";
+    if (gltf && std::strcmp(root->mName.C_Str(), "ROOT") != 0 && !startsWithCi(root->mName.C_Str(), "base") && lodAnchor(root)) {
+        return true;
+    }
+    if (lodAnchor(root)) {
+        return false;
+    }
+    for (unsigned i = 0; i < root->mNumChildren; ++i) {
+        const aiNode* child = root->mChildren[i];
+        if (!child->mNumMeshes && lodAnchor(child) && !startsWithCi(child->mName.C_Str(), "base") &&
+            !startsWithCi(child->mName.C_Str(), "start")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void anchorGameLod(aiScene& scene, const std::string& formatId, ConvertResult& r)
+{
+    aiNode* root = scene.mRootNode;
+    if (!root) {
+        return;
+    }
+    const bool gltf = formatId == "gltf2" || formatId == "gltf1";
+    const std::set<std::string> referenced = referencedNodeNames(scene);
+    int folded = 0;
+    while (!lodAnchor(root) && collapseLodWrapper(root, referenced)) {
+        ++folded;
+    }
+    if (folded) {
+        r.log.push_back(format("lod: folded %d wrapper node(s) so base/start stays visible", folded));
+    }
+    if (!gltf || !lodAnchor(root) || root->mNumMeshes || std::strcmp(root->mName.C_Str(), "ROOT") == 0 ||
+        startsWithCi(root->mName.C_Str(), "base")) {
+        return;
+    }
+    const std::string old = root->mName.C_Str();
+    renameReferences(scene, old, "ROOT");
+    root->mName = "ROOT";
+    r.log.push_back("lod: named the root ROOT so the game does not add a second one");
 }
 
 // The FBX exporter merges all meshes of a node into one geometry and writes UV and color layers
@@ -257,6 +413,16 @@ bool writeAssimp(const aiScene& scene, const Format& target, const nlohmann::jso
         applyYUpFrame(*owned, frame.wrapRoot);
         out = owned.get();
     }
+    if (lodAnchorNeeded(*out, target.id)) {
+        if (!owned) {
+            aiScene* copy = nullptr;
+            Assimp::SceneCombiner::CopyScene(&copy, out);
+            owned.reset(copy);
+            out = owned.get();
+        }
+        anchorGameLod(*owned, target.id, r);
+        out = owned.get();
+    }
     if (exporter.Export(out, target.exporterId(settings), path, 0, &props) != aiReturn_SUCCESS) {
         r.error = exporter.GetErrorString();
         if (r.error.empty()) {
@@ -347,6 +513,8 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
 
     // Re-read what was written and compare it with what the source holds.
     Summary before, after;
+    const aiScene* writtenScene = nullptr;
+    Model reread;
     const ts::TsToAiOptions exportOpts = tsToAiOptions(target, settings);
     if (target.isTs) {
         ts::Shape written;
@@ -368,7 +536,6 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
             after = summarize(written, DetailFilter{});
         }
     } else {
-        Model reread;
         std::string err;
         std::vector<std::string> ignored;
         if (!reread.load(outputPath, err, ignored)) {
@@ -387,12 +554,16 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
         } else {
             before = summarize(*scene);
         }
-        after = summarize(*reread.scene(exportOpts, ignored));
+        writtenScene = reread.scene(exportOpts, ignored);
+        after = summarize(*writtenScene);
     }
     const Capabilities caps = targetCaps(target, settings);
     r.report = compareSummaries(before, after, caps, toleranceFor(target, settings));
     if (!target.isTs) {
         checkUpAxis(r.report, writerFrame(target.id).up, readRawFrame(outputPath), before);
+        if (writtenScene && scene) {
+            checkGameLod(r.report, target.id, *writtenScene, *scene, caps.hierarchy);
+        }
     }
     r.validated = true;
     return r;
