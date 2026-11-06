@@ -31,7 +31,8 @@ Converts between BeamNG shapes and the formats Assimp reads and writes.
 - Scan a directory, tick the source extensions to read, and pick one target from the dropdown. That format's settings appear beside it.
 - Files are written beside the source, or into a folder that mirrors the source tree. An output that already exists is skipped until overwrite is enabled.
 - Conversion uses every available CPU core.
-- Optional validation re-reads each written file and compares geometry, normals, UVs, colors, tangents, materials, skin weights, and animation with the source. The log shows a pass, warning, or failure per file, and the run writes `model_validation.json`.
+- Up axis: models are handled in game space (Z up, like Blender). Y-up formats (glTF, FBX, OBJ and most others) are rotated when read and written, COLLADA files follow their `<up_axis>`, and STL, PLY, 3DS and 3MF stay Z up. A glTF written here has the same `(x, y, z) -> (x, z, -y)` root rotation that BeamNG's own glTF export uses, so it imports upright in Blender and in the game.
+- Optional validation re-reads each written file and compares geometry, normals, UVs, colors, tangents, materials, skin weights, and animation with the source. It also reads the file without any axis conversion and fails when the declared up axis (COLLADA, FBX) or the stored extents do not match the format's frame. The log shows a pass, warning, or failure per file, and the run writes `model_validation.json`.
 - Collada files the game still loads are repaired on import when the XML declaration is broken or the scene reference points nowhere. BeamNG `.ter` terrain and Blender `.blend` files are not offered as sources.
 
 ## Languages

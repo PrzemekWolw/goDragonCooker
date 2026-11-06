@@ -367,7 +367,13 @@ void checkUpAxis(ValidationReport& rep, UpAxis expected, const RawFrame& raw, co
             worst = std::max(worst, double(std::fabs(x)));
         }
         j["extentsDeviation"] = worst;
-        if (worst > tol) {
+        // A writer that drops meshes shrinks the extents without turning the model: those still sit inside
+        // the expected box, and the geometry check reports the loss.
+        const bool inside = d[0] >= -tol && d[1] >= -tol && d[2] >= -tol && d[3] <= tol && d[4] <= tol && d[5] <= tol;
+        if (worst > tol && inside) {
+            text += ", stored extents lie inside the game model (geometry is incomplete, see above)";
+            j["incomplete"] = true;
+        } else if (worst > tol) {
             v = Verdict::Fail;
             text += format(", stored extents %.3g x %.3g x %.3g but %.3g x %.3g x %.3g expected",
                            raw.bounds.max.x - raw.bounds.min.x, raw.bounds.max.y - raw.bounds.min.y,
