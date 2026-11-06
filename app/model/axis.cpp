@@ -98,6 +98,10 @@ RawFrame readRawFrame(const std::string& path)
             scene->mMetaData->Get("UpAxisSign", sign);
             r.declaredNegative = sign < 0;
         }
+    } else if (ext == ".3ds") {
+        // Assimp's 3DS reader turns the file's Z-up into Y-up on its own.
+        aiMatrix4x4& root = const_cast<aiMatrix4x4&>(scene->mRootNode->mTransformation);
+        root = yUpToZUp() * root;
     }
     const Summary s = summarize(*scene);
     r.hasGeometry = !s.tris.empty();

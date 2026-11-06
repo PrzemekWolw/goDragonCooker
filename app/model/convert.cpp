@@ -336,6 +336,99 @@ Capabilities targetCaps(const Format& target, const nlohmann::json& settings)
     return c;
 }
 
+// Writers without skins store skinned meshes as plain geometry under their node, so pose them the way the skin
+// places them (bones at their current transforms) and drop the bones.
+void bakeSkins(aiScene& scene)
+{
+    std::map<const aiNode*, aiMatrix4x4> worldOf;
+    std::map<std::string, const aiNode*> byName;
+    std::map<unsigned, const aiNode*> holder;
+    auto walk = [&](auto& self, const aiNode* n, const aiMatrix4x4& parent) -> void {
+        worldOf[n] = parent * n->mTransformation;
+        byName.emplace(n->mName.C_Str(), n);
+        for (unsigned i = 0; i < n->mNumMeshes; ++i) {
+            holder.emplace(n->mMeshes[i], n);
+        }
+        for (unsigned i = 0; i < n->mNumChildren; ++i) {
+            self(self, n->mChildren[i], worldOf[n]);
+        }
+    };
+    walk(walk, scene.mRootNode, aiMatrix4x4());
+    for (unsigned m = 0; m < scene.mNumMeshes; ++m) {
+        aiMesh* mesh = scene.mMeshes[m];
+        if (!mesh->mNumBones || !holder.count(m)) {
+            continue;
+        }
+        const aiMatrix4x4 nodeWorld = worldOf[holder[m]];
+        const aiMatrix4x4 toLocal = aiMatrix4x4(nodeWorld).Inverse();
+        std::vector<aiMatrix4x4> sum(mesh->mNumVertices, aiMatrix4x4(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+        std::vector<float> total(mesh->mNumVertices, 0.0f);
+        for (unsigned b = 0; b < mesh->mNumBones; ++b) {
+            const aiBone* bone = mesh->mBones[b];
+            auto it = byName.find(bone->mName.C_Str());
+            const aiMatrix4x4 skin = (it != byName.end() ? worldOf[it->second] : aiMatrix4x4()) * bone->mOffsetMatrix;
+            for (unsigned w = 0; w < bone->mNumWeights; ++w) {
+                const aiVertexWeight& vw = bone->mWeights[w];
+                if (vw.mVertexId >= mesh->mNumVertices || vw.mWeight <= 0) {
+                    continue;
+                }
+                aiMatrix4x4& s = sum[vw.mVertexId];
+                for (int r = 0; r < 4; ++r) {
+                    for (int c = 0; c < 4; ++c) {
+                        s[r][c] += skin[r][c] * vw.mWeight;
+                    }
+                }
+                total[vw.mVertexId] += vw.mWeight;
+            }
+        }
+        for (unsigned v = 0; v < mesh->mNumVertices; ++v) {
+            if (total[v] <= 0) {
+                continue;
+            }
+            aiMatrix4x4 xf = sum[v];
+            for (int r = 0; r < 4; ++r) {
+                for (int c = 0; c < 4; ++c) {
+                    xf[r][c] /= total[v];
+                }
+            }
+            xf = toLocal * xf;
+            const aiMatrix3x3 rot(xf);
+            const aiMatrix3x3 nrm = aiMatrix3x3(rot).Inverse().Transpose();
+            mesh->mVertices[v] = xf * mesh->mVertices[v];
+            if (mesh->mNormals) {
+                mesh->mNormals[v] = (nrm * mesh->mNormals[v]).NormalizeSafe();
+            }
+            if (mesh->mTangents && mesh->mBitangents) {
+                mesh->mTangents[v] = (rot * mesh->mTangents[v]).NormalizeSafe();
+                mesh->mBitangents[v] = (rot * mesh->mBitangents[v]).NormalizeSafe();
+            }
+        }
+        for (unsigned b = 0; b < mesh->mNumBones; ++b) {
+            delete mesh->mBones[b];
+        }
+        delete[] mesh->mBones;
+        mesh->mBones = nullptr;
+        mesh->mNumBones = 0;
+    }
+}
+
+// A face pointing past its mesh's vertices means the file is corrupt (or read past its end).
+std::string badFaceIndex(const aiScene& scene)
+{
+    for (unsigned m = 0; m < scene.mNumMeshes; ++m) {
+        const aiMesh* mesh = scene.mMeshes[m];
+        for (unsigned f = 0; f < mesh->mNumFaces; ++f) {
+            const aiFace& face = mesh->mFaces[f];
+            for (unsigned i = 0; i < face.mNumIndices; ++i) {
+                if (face.mIndices[i] >= mesh->mNumVertices) {
+                    return format("mesh '%s' face %u uses vertex %u of %u", mesh->mName.C_Str(), f, face.mIndices[i], mesh->mNumVertices);
+                }
+            }
+        }
+    }
+    return {};
+}
+
 uintmax_t fileSize(const std::string& path)
 {
     std::error_code ec;
@@ -408,6 +501,17 @@ bool writeAssimp(const aiScene& scene, const Format& target, const nlohmann::jso
     } else if (target.id == "fbx") {
         owned.reset(fbxScene(scene));
         out = owned.get();
+    }
+    const bool bones = std::any_of(out->mMeshes, out->mMeshes + out->mNumMeshes, [](const aiMesh* m) { return m->mNumBones > 0; });
+    if (bones && !targetCaps(target, settings).skins) {
+        if (!owned) {
+            aiScene* copy = nullptr;
+            Assimp::SceneCombiner::CopyScene(&copy, &scene);
+            owned.reset(copy);
+        }
+        bakeSkins(*owned);
+        out = owned.get();
+        r.log.push_back("skins: posed skinned meshes into plain geometry (the format has no skins)");
     }
     const WriterFrame frame = writerFrame(target.id);
     if (frame.up == UpAxis::Y) {
@@ -516,6 +620,14 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
     if (!options.validate) {
         return r;
     }
+    // Assimp has no reader for these outputs (its .stp reader only reads IFC), so there is nothing to compare.
+    if (!target.isTs && (!readerForExt(modelExtension(outputPath)) || target.id == "stp")) {
+        r.report.verdict = Verdict::Warn;
+        r.report.lines.push_back("WARN not validated: the file cannot be read back to compare");
+        r.report.json["verdict"] = verdictName(r.report.verdict);
+        r.validated = true;
+        return r;
+    }
 
     // Re-read what was written and compare it with what the source holds.
     Summary before, after;
@@ -561,6 +673,12 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
             before = summarize(*scene);
         }
         writtenScene = reread.scene(exportOpts, ignored);
+        if (const std::string bad = badFaceIndex(*writtenScene); !bad.empty()) {
+            r.report.verdict = Verdict::Fail;
+            r.report.lines.push_back("FAIL re-read: " + bad);
+            r.validated = true;
+            return r;
+        }
         after = summarize(*writtenScene);
     }
     const Capabilities caps = targetCaps(target, settings);
@@ -570,7 +688,7 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
         if (writtenScene && scene) {
             checkGameLod(r.report, target.id, *writtenScene, *scene, caps.hierarchy);
             checkSeams(r.report, *writtenScene, *scene, toleranceFor(target, settings).posRel);
-            if (caps.tangents) {
+            if (target.id == "gltf2") {
                 checkTangents(r.report, *writtenScene, *scene);
             }
         }

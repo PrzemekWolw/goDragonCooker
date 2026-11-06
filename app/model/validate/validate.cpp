@@ -478,10 +478,13 @@ SeamResult countSeamGaps(const aiNode* node, const aiScene& scene, double minRel
     SeamResult result;
     if (node->mNumMeshes >= 2) {
         std::vector<std::set<std::array<float, 3>>> verts(node->mNumMeshes);
+        // Meshes sharing a material are one group: writers split large meshes, which is not a seam.
+        std::vector<unsigned> group(node->mNumMeshes);
         std::vector<SeamTri> tris;
         Vec3d lo(1e30, 1e30, 1e30), hi(-1e30, -1e30, -1e30);
         for (unsigned m = 0; m < node->mNumMeshes; ++m) {
             const aiMesh* mesh = scene.mMeshes[node->mMeshes[m]];
+            group[m] = mesh->mMaterialIndex;
             for (unsigned v = 0; v < mesh->mNumVertices; ++v) {
                 const aiVector3D& p = mesh->mVertices[v];
                 verts[m].insert({p.x, p.y, p.z});
@@ -494,7 +497,7 @@ SeamResult countSeamGaps(const aiNode* node, const aiScene& scene, double minRel
                     continue;
                 }
                 const aiVector3D &p0 = mesh->mVertices[face.mIndices[0]], &p1 = mesh->mVertices[face.mIndices[1]], &p2 = mesh->mVertices[face.mIndices[2]];
-                SeamTri t{m, Vec3d(p0.x, p0.y, p0.z), Vec3d(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z), Vec3d(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z), {}};
+                SeamTri t{group[m], Vec3d(p0.x, p0.y, p0.z), Vec3d(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z), Vec3d(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z), {}};
                 t.n = t.e0 ^ t.e1;
                 const double len = t.n.Length();
                 if (len > 0) {
@@ -536,7 +539,7 @@ SeamResult countSeamGaps(const aiNode* node, const aiScene& scene, double minRel
                 bool near = false;
                 for (unsigned i : it->second) {
                     const SeamTri& t = tris[i];
-                    if (t.mesh == m) {
+                    if (t.mesh == group[m]) {
                         continue;
                     }
                     const double d = (v - t.a) * t.n;
@@ -575,7 +578,7 @@ SeamResult countSeamGaps(const aiNode* node, const aiScene& scene, double minRel
                             }
                             for (const auto& [om, q] : it->second) {
                                 const double d = (v - q).Length();
-                                if (om != m && d > 0 && d <= splitCell) {
+                                if (om != group[m] && d > 0 && d <= splitCell) {
                                     split = true;
                                     break;
                                 }
@@ -584,7 +587,7 @@ SeamResult countSeamGaps(const aiNode* node, const aiScene& scene, double minRel
                     }
                 }
                 result.splits += split;
-                points[c].push_back({m, v});
+                points[c].push_back({group[m], v});
             }
         }
     }
@@ -691,7 +694,16 @@ void checkTangents(ValidationReport& report, const aiScene& written, const aiSce
 
 void checkGameLod(ValidationReport& report, const std::string& formatId, const aiScene& written, const aiScene& source, bool hierarchy)
 {
-    if (!hierarchy || !treeHasLodAnchor(source.mRootNode)) {
+    if (!treeHasLodAnchor(source.mRootNode)) {
+        return;
+    }
+    if (!hierarchy) {
+        if (int(Verdict::Warn) > int(report.verdict)) {
+            report.verdict = Verdict::Warn;
+        }
+        report.lines.push_back("WARN LOD: the format keeps no node names, so the game sees no detail levels or collision meshes");
+        report.json["lod"] = {{"source", true}, {"detected", false}};
+        report.json["verdict"] = verdictName(report.verdict);
         return;
     }
     const aiNode* root = written.mRootNode;
@@ -910,11 +922,22 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
             if (maxDist > posTol * 10.0 && (ab.outliers || ba.outliers || matchedFrac < 0.999)) {
                 v = Verdict::Fail;
             }
+            // Whatever the quantization setting allows, a vertex that left its place by more than the float
+            // precision of the model's coordinates is a visible change.
+            const double maxAbs = std::max({std::fabs(double(src.bounds.min.x)), std::fabs(double(src.bounds.min.y)), std::fabs(double(src.bounds.min.z)),
+                                            std::fabs(double(src.bounds.max.x)), std::fabs(double(src.bounds.max.y)), std::fabs(double(src.bounds.max.z))});
+            const double exactPos = 8.0 * maxAbs * 1.2e-7 + diag * 4e-6; // a few float roundings through node transforms
+            std::string moved;
+            if (maxDist > exactPos) {
+                v = std::max(v, maxDist > exactPos * 10.0 ? Verdict::Fail : Verdict::Warn);
+                moved = format(", vertices moved up to %.3g where float precision is %.3g", maxDist, exactPos);
+            }
+            g["positionExact"] = exactPos;
             std::string text = format("geometry: %zu/%zu triangles matched (%zu extra", match.pairs.size(), comparable, match.unmatchedB);
             if (match.droppedDegenerate) {
                 text += format(", %zu below tolerance skipped", match.droppedDegenerate);
             }
-            line(v, tag + text + format("), max %.3g (%.2g of bbox), rms %.3g", maxDist, maxDist / diag, std::max(ab.dist.rms(), ba.dist.rms())));
+            line(v, tag + text + format("), max %.3g (%.2g of bbox), rms %.3g", maxDist, maxDist / diag, std::max(ab.dist.rms(), ba.dist.rms())) + moved);
         }
 
         size_t flipped = 0;

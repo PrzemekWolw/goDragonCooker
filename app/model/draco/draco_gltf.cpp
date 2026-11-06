@@ -339,6 +339,10 @@ bool encodePrimitive(const Document& doc, const json& prim, const DracoOptions& 
         } else {
             encoder.SetAttributeQuantization(id, bits);
         }
+        // Draco's geometric normal prediction decodes wrong normals from fine position quantization.
+        if (mesh.attribute(id)->attribute_type() == draco::GeometryAttribute::NORMAL) {
+            encoder.SetAttributePredictionScheme(id, draco::PREDICTION_DIFFERENCE);
+        }
     }
     draco::EncoderBuffer buffer;
     if (!encoder.EncodeToBuffer(&buffer).ok()) {

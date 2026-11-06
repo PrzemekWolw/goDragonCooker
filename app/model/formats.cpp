@@ -112,9 +112,9 @@ struct Registry {
         cdae.exts = {".cdae"};
         cdae.canRead = cdae.canWrite = cdae.isTs = true;
         cdae.caps = {true, true, true, true, true, true, true, true, true, true, true};
-        cdae.settings.push_back(choiceSetting("compression", "gdc.format.compression.label", {"gdc.format.compression.choice.auto", "gdc.format.choice.on", "gdc.format.choice.off"}, 0,
+        cdae.settings.push_back(choiceSetting("compression", "gdc.format.compression.label", {"gdc.format.compression.choice.auto", "gdc.format.choice.on", "gdc.format.choice.off"}, 1,
                                               "gdc.format.compression.tooltip"));
-        SettingDef level = intSetting("zstdLevel", "gdc.format.zstdLevel.label", 1, 19, 3);
+        SettingDef level = intSetting("zstdLevel", "gdc.format.zstdLevel.label", 1, 19, 19);
         level.visible = whenNe("compression", 2);
         cdae.settings.push_back(level);
         addTsImportSettings(cdae.settings);
@@ -186,7 +186,7 @@ struct Registry {
             f.settings.push_back(boolSetting("draco", "gdc.format.draco.label", false,
                                              "gdc.format.draco.tooltip"));
             auto dracoOn = whenTrue("draco");
-            SettingDef level = intSetting("dracoLevel", "gdc.format.dracoLevel.label", 0, 10, 7,
+            SettingDef level = intSetting("dracoLevel", "gdc.format.dracoLevel.label", 0, 10, 10,
                                           "gdc.format.dracoLevel.tooltip");
             level.visible = dracoOn;
             f.settings.push_back(level);
@@ -196,13 +196,13 @@ struct Registry {
                 int def;
                 const char* tip;
             } bits[] = {
-                {"qPos", "gdc.format.qPos.label", 14,
+                {"qPos", "gdc.format.qPos.label", 20,
                  "gdc.format.qPos.tooltip"},
-                {"qNormal", "gdc.format.qNormal.label", 10,
+                {"qNormal", "gdc.format.qNormal.label", 12,
                  "gdc.format.qNormal.tooltip"},
-                {"qUv", "gdc.format.qUv.label", 12,
+                {"qUv", "gdc.format.qUv.label", 16,
                  "gdc.format.qUv.tooltip"},
-                {"qColor", "gdc.format.qColor.label", 8,
+                {"qColor", "gdc.format.qColor.label", 10,
                  "gdc.format.qColor.tooltip"},
                 {"qGeneric", "gdc.format.qGeneric.label", 12,
                  "gdc.format.qGeneric.tooltip"}};
@@ -307,7 +307,9 @@ struct Registry {
                 f.caps.uv2 = f.caps.colors = f.caps.tangents = f.caps.skins = f.caps.animations = f.caps.morphs = true;
             } else if (id == "3ds") {
                 f.caps.normals = false;
+                f.caps.hierarchy = false; // object names are limited to 10 characters
             } else if (id == "3mf" || id == "stp" || id == "pbrt") {
+                f.caps.hierarchy = false;
                 f.caps.uv = id == "pbrt";
                 f.caps.normals = id == "pbrt";
             }

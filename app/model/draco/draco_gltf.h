@@ -5,11 +5,11 @@
 namespace model {
 
 struct DracoOptions {
-    int level = 7; // 0..10, higher is smaller and slower
-    int qPos = 14;
-    int qNormal = 10;
-    int qUv = 12;
-    int qColor = 8;
+    int level = 10; // 0..10, higher is smaller and slower
+    int qPos = 20;  // the coarsest grid whose error stays inside the validator's float-precision position check
+    int qNormal = 12;
+    int qUv = 16;
+    int qColor = 10;
     int qGeneric = 12; // tangents; joints and weights stay lossless
 };
 
