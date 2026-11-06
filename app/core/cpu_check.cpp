@@ -70,7 +70,7 @@ bool hasX86_64V3()
 }
 
 const char kMessage[] =
-    "goDragonCooker needs a CPU with x86-64-v3 support (AVX2, FMA, BMI2): "
+    "CK Asset Tools needs a CPU with x86-64-v3 support (AVX2, FMA, BMI2): "
     "Intel Haswell (2013), AMD Zen (2017) or newer.";
 
 void checkCpu()
@@ -82,7 +82,7 @@ void checkCpu()
     std::fputs("\n", stderr);
 #if defined(_WIN32)
     if (!GetConsoleWindow()) {
-        MessageBoxA(nullptr, kMessage, "goDragonCooker", MB_OK | MB_ICONERROR);
+        MessageBoxA(nullptr, kMessage, "CK Asset Tools", MB_OK | MB_ICONERROR);
     }
     ExitProcess(1);
 #else

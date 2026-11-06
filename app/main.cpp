@@ -201,7 +201,7 @@ int main()
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 #endif
 
-    const std::string title = std::string("Materials Tools (GoDragonPBR) v") + APP_VERSION;
+    const std::string title = std::string("CK Asset Tools v") + APP_VERSION;
     GLFWwindow* window = glfwCreateWindow(1280, 900, title.c_str(), nullptr, nullptr);
     if (!window) {
         glfwTerminate();
