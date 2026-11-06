@@ -105,6 +105,23 @@ set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_ZLIB ON CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_DRACO ON CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_DRACO_STATIC ON CACHE BOOL "" FORCE)
+# Exporter fixes that are not on assimp/assimp. CI checks out the upstream commit, so apply them here.
+set(_assimp_patch "${CMAKE_CURRENT_SOURCE_DIR}/third_party/assimp-exporters.patch")
+execute_process(
+    COMMAND git apply --reverse --check "${_assimp_patch}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/assimp"
+    RESULT_VARIABLE _assimp_already
+    OUTPUT_QUIET ERROR_QUIET)
+if(NOT _assimp_already EQUAL 0)
+    execute_process(
+        COMMAND git apply "${_assimp_patch}"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/assimp"
+        RESULT_VARIABLE _assimp_apply
+        ERROR_VARIABLE _assimp_err)
+    if(NOT _assimp_apply EQUAL 0)
+        message(FATAL_ERROR "Failed to apply ${_assimp_patch}: ${_assimp_err}")
+    endif()
+endif()
 add_subdirectory(third_party/assimp EXCLUDE_FROM_ALL)
 # Draco generates draco/draco_features.h under the top-level binary dir, which Assimp only finds when it is the root project.
 target_include_directories(assimp PRIVATE "${CMAKE_BINARY_DIR}")

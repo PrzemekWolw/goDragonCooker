@@ -1,0 +1,494 @@
+diff --git a/code/AssetLib/3DS/3DSExporter.cpp b/code/AssetLib/3DS/3DSExporter.cpp
+index 5fee9b952..0633b5b74 100644
+--- a/code/AssetLib/3DS/3DSExporter.cpp
++++ b/code/AssetLib/3DS/3DSExporter.cpp
+@@ -122,8 +122,8 @@ std::string GetMaterialName(const aiMaterial &mat, unsigned int index) {
+     char postfix[10] = { 0 };
+     ASSIMP_itoa10(postfix, index);
+ 
+-    if (aiString mat_name; AI_SUCCESS == mat.Get(AI_MATKEY_NAME, mat_name)) {
+-        return mat_name.C_Str() + underscore + postfix;
++    if (aiString mat_name; AI_SUCCESS == mat.Get(AI_MATKEY_NAME, mat_name) && mat_name.length > 0) {
++        return mat_name.C_Str();
+     }
+ 
+     return "Material" + underscore + postfix;
+@@ -443,7 +443,7 @@ void Discreet3DSExporter::WriteMeshes() {
+             const uint16_t count = static_cast<uint16_t>(mesh.mNumVertices);
+             writer.PutU2(count);
+             for (unsigned int i = 0; i < mesh.mNumVertices; ++i) {
+-                const aiVector3D &v = mesh.mVertices[i];
++                const aiVector3D v = trafo * mesh.mVertices[i];
+                 writer.PutF4(v.x);
+                 writer.PutF4(v.y);
+                 writer.PutF4(v.z);
+@@ -488,9 +488,12 @@ void Discreet3DSExporter::WriteMeshes() {
+                     continue;
+                 }
+ 
++                // A mirroring transform baked into the vertices flips the winding.
++                const bool mirrored = trafo.Determinant() < 0.0f;
+                 for (unsigned int j = 0; j < 3; ++j) {
+-                    ai_assert(f.mIndices[j] <= 0xffff);
+-                    writer.PutI2(static_cast<uint16_t>(f.mIndices[j]));
++                    const unsigned int k = mirrored && j ? 3 - j : j;
++                    ai_assert(f.mIndices[k] <= 0xffff);
++                    writer.PutI2(static_cast<uint16_t>(f.mIndices[k]));
+                 }
+ 
+                 // Edge visibility flag
+@@ -502,18 +505,17 @@ void Discreet3DSExporter::WriteMeshes() {
+             WriteFaceMaterialChunk(mesh);
+         }
+ 
+-        // Transformation matrix by which the mesh vertices have been pre-transformed with.
++        // Identity: no node transforms are written, so readers must keep the world-space vertices as they are.
+         {
+             ChunkWriter curChunk(writer, Discreet3DS::CHUNK_TRMATRIX);
+-            // Store rotation 3x3 matrix row wise
++            const aiMatrix4x4 identity;
+             for (unsigned int r = 0; r < 3; ++r) {
+                 for (unsigned int c = 0; c < 3; ++c) {
+-                    writer.PutF4(trafo[r][c]);
++                    writer.PutF4(identity[r][c]);
+                 }
+             }
+-            // Store translation sub vector column wise
+             for (unsigned int r = 0; r < 3; ++r) {
+-                writer.PutF4(trafo[r][3]);
++                writer.PutF4(identity[r][3]);
+             }
+         }
+     }
+diff --git a/code/AssetLib/3MF/D3MFExporter.cpp b/code/AssetLib/3MF/D3MFExporter.cpp
+index 923323c54..02338da69 100644
+--- a/code/AssetLib/3MF/D3MFExporter.cpp
++++ b/code/AssetLib/3MF/D3MFExporter.cpp
+@@ -169,6 +169,7 @@ bool D3MFExporter::exportRelations() {
+ 
+ bool D3MFExporter::export3DModel() {
+     mModelOutput.clear();
++    mModelOutput.precision(9); // round-trips a float
+ 
+     writeHeader();
+     mModelOutput << "<" << XmlTag::model << " " << XmlTag::model_unit << "=\"millimeter\""
+@@ -279,29 +280,32 @@ void D3MFExporter::writeObjects() {
+         return;
+     }
+ 
+-    aiNode *root = mScene->mRootNode;
+-    for (unsigned int i = 0; i < root->mNumChildren; ++i) {
+-        aiNode *currentNode(root->mChildren[i]);
+-        if (nullptr == currentNode) {
++    writeNode(mScene->mRootNode, aiMatrix4x4());
++}
++
++// 3MF has no node hierarchy and an object holds one mesh, so every mesh becomes its own
++// object with the vertices in world space.
++void D3MFExporter::writeNode(const aiNode *node, const aiMatrix4x4 &parent) {
++    const aiMatrix4x4 world = parent * node->mTransformation;
++    for (unsigned int j = 0; j < node->mNumMeshes; ++j) {
++        aiMesh *currentMesh = mScene->mMeshes[node->mMeshes[j]];
++        if (nullptr == currentMesh) {
+             continue;
+         }
+-        mModelOutput << "<" << XmlTag::object << " id=\"" << i + 2 << "\" type=\"model\">";
++        const unsigned int id = static_cast<unsigned int>(mBuildItems.size());
++        mModelOutput << "<" << XmlTag::object << " id=\"" << id + 2 << "\" name=\"" << node->mName.C_Str() << "\" type=\"model\">";
+         mModelOutput << std::endl;
+-        for (unsigned int j = 0; j < currentNode->mNumMeshes; ++j) {
+-            aiMesh *currentMesh = mScene->mMeshes[currentNode->mMeshes[j]];
+-            if (nullptr == currentMesh) {
+-                continue;
+-            }
+-            writeMesh(currentMesh);
+-        }
+-        mBuildItems.push_back(i);
+-
++        writeMesh(currentMesh, world);
++        mBuildItems.push_back(id);
+         mModelOutput << "</" << XmlTag::object << ">";
+         mModelOutput << std::endl;
+     }
++    for (unsigned int i = 0; i < node->mNumChildren; ++i) {
++        writeNode(node->mChildren[i], world);
++    }
+ }
+ 
+-void D3MFExporter::writeMesh(aiMesh *mesh) {
++void D3MFExporter::writeMesh(aiMesh *mesh, const aiMatrix4x4 &world) {
+     if (nullptr == mesh) {
+         return;
+     }
+@@ -313,7 +317,7 @@ void D3MFExporter::writeMesh(aiMesh *mesh) {
+                  << XmlTag::vertices
+                  << ">" << "\n";
+     for (unsigned int i = 0; i < mesh->mNumVertices; ++i) {
+-        writeVertex(mesh->mVertices[i]);
++        writeVertex(world * mesh->mVertices[i]);
+     }
+     mModelOutput << "</"
+                  << XmlTag::vertices << ">"
+@@ -321,7 +325,7 @@ void D3MFExporter::writeMesh(aiMesh *mesh) {
+ 
+     const unsigned int matIdx(mesh->mMaterialIndex);
+ 
+-    writeFaces(mesh, matIdx);
++    writeFaces(mesh, matIdx, world.Determinant() < 0.0f);
+ 
+     mModelOutput << "</"
+                  << XmlTag::mesh << ">"
+@@ -333,7 +337,7 @@ void D3MFExporter::writeVertex(const aiVector3D &pos) {
+     mModelOutput << std::endl;
+ }
+ 
+-void D3MFExporter::writeFaces(aiMesh *mesh, unsigned int matIdx) {
++void D3MFExporter::writeFaces(aiMesh *mesh, unsigned int matIdx, bool mirrored) {
+     if (nullptr == mesh) {
+         return;
+     }
+@@ -347,7 +351,7 @@ void D3MFExporter::writeFaces(aiMesh *mesh, unsigned int matIdx) {
+     for (unsigned int i = 0; i < mesh->mNumFaces; ++i) {
+         aiFace &currentFace = mesh->mFaces[i];
+         mModelOutput << "<" << XmlTag::triangle << " v1=\"" << currentFace.mIndices[0] << "\" v2=\""
+-                     << currentFace.mIndices[1] << "\" v3=\"" << currentFace.mIndices[2]
++                     << currentFace.mIndices[mirrored ? 2 : 1] << "\" v3=\"" << currentFace.mIndices[mirrored ? 1 : 2]
+                      << "\" pid=\"1\" p1=\"" + ai_to_string(matIdx) + "\" />";
+         mModelOutput << "\n";
+     }
+diff --git a/code/AssetLib/3MF/D3MFExporter.h b/code/AssetLib/3MF/D3MFExporter.h
+index 686244117..e62255937 100644
+--- a/code/AssetLib/3MF/D3MFExporter.h
++++ b/code/AssetLib/3MF/D3MFExporter.h
+@@ -47,6 +47,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include <sstream>
+ #include <vector>
+ #include <assimp/vector3.h>
++#include <assimp/matrix4x4.h>
+ 
+ struct aiScene;
+ struct aiNode;
+@@ -79,9 +80,10 @@ protected:
+     void writeMetaData();
+     void writeBaseMaterials();
+     void writeObjects();
+-    void writeMesh( aiMesh *mesh );
++    void writeNode( const aiNode *node, const aiMatrix4x4 &parent );
++    void writeMesh( aiMesh *mesh, const aiMatrix4x4 &world );
+     void writeVertex( const aiVector3D &pos );
+-    void writeFaces( aiMesh *mesh, unsigned int matIdx );
++    void writeFaces( aiMesh *mesh, unsigned int matIdx, bool mirrored );
+     void writeBuild();
+ 
+     // Zip the data
+diff --git a/code/AssetLib/3MF/XmlSerializer.cpp b/code/AssetLib/3MF/XmlSerializer.cpp
+index a8330fae3..9f20e6241 100644
+--- a/code/AssetLib/3MF/XmlSerializer.cpp
++++ b/code/AssetLib/3MF/XmlSerializer.cpp
+@@ -653,15 +653,10 @@ aiMaterial *XmlSerializer::readMaterialDef(XmlNode &node, unsigned int basemater
+     bool hasName = getNodeAttribute(node, D3MF::XmlTag::basematerials_name, name);
+ 
+     std::string stdMaterialName;
+-    const std::string strId(ai_to_string(basematerialsId));
+-    stdMaterialName += "id";
+-    stdMaterialName += strId;
+-    stdMaterialName += "_";
+-    if (hasName) {
+-        stdMaterialName += name;
++    if (hasName && !name.empty()) {
++        stdMaterialName = name;
+     } else {
+-        stdMaterialName += "basemat_";
+-        stdMaterialName += ai_to_string(mMaterials.size());
++        stdMaterialName = "id" + ai_to_string(basematerialsId) + "_basemat_" + ai_to_string(mMaterials.size());
+     }
+ 
+     aiString assimpMaterialName(stdMaterialName);
+diff --git a/code/AssetLib/FBX/FBXExporter.cpp b/code/AssetLib/FBX/FBXExporter.cpp
+index 90ce22a75..1c0beef57 100644
+--- a/code/AssetLib/FBX/FBXExporter.cpp
++++ b/code/AssetLib/FBX/FBXExporter.cpp
+@@ -1225,10 +1225,11 @@ void FBXExporter::WriteObjects () {
+           const auto num_uv = static_cast<size_t>(m->GetNumUVChannels());
+           uv_indices.resize(std::max(num_uv, uv_indices.size()));
+           uv_data.resize(std::max(num_uv, uv_data.size()));
+-          std::map<aiVector3D, int32_t> index_by_uv;
+ 
+-          // uvs, if any
++          // uvs, if any. One index map per channel: a shared map writes channel 0's
++          // indices into channel 1, and the importer then drops the whole mesh.
+           for (size_t uvi = 0; uvi < m->GetNumUVChannels(); uvi++) {
++            std::map<aiVector3D, int32_t> index_by_uv;
+             const auto nc = m->mNumUVComponents[uvi];
+             if (nc > 2) {
+                 // FBX only supports 2-channel UV maps...
+@@ -2124,6 +2125,14 @@ void FBXExporter::WriteObjects () {
+             aiMatrix4x4 inverse_bone_xform = bone_xform;
+             inverse_bone_xform.Inverse();
+             aiMatrix4x4 tr = inverse_bone_xform * mesh_xform;
++            // The offset matrix holds the bind pose even when the skeleton is posed: readers rebuild it as
++            // TransformLink^-1 * Transform, with Transform the mesh's world transform at binding.
++            if (b) {
++                aiMatrix4x4 inverse_offset = b->mOffsetMatrix;
++                inverse_offset.Inverse();
++                bone_xform = mesh_xform * inverse_offset;
++                tr = mesh_xform;
++            }
+ 
+             sdnode.AddChild("Transform", tr);
+ 
+diff --git a/code/AssetLib/Ply/PlyExporter.cpp b/code/AssetLib/Ply/PlyExporter.cpp
+index 28416459a..649b9c4e6 100644
+--- a/code/AssetLib/Ply/PlyExporter.cpp
++++ b/code/AssetLib/Ply/PlyExporter.cpp
+@@ -167,6 +167,16 @@ PlyExporter::PlyExporter(const char* _filename, const aiScene* pScene, bool bina
+     // but in reality most importers only know about vertex positions, normals
+     // and texture coordinates).
+     for (unsigned int n = PLY_EXPORT_HAS_TEXCOORDS, c = 0; (components & n) && c != AI_MAX_NUMBER_OF_TEXTURECOORDS; n <<= 1, ++c) {
++        if (!c) {
++            mOutput << "property " << typeName << " s" << endl;
++            mOutput << "property " << typeName << " t" << endl;
++        } else {
++            mOutput << "property " << typeName << " s" << c << endl;
++            mOutput << "property " << typeName << " t" << c << endl;
++        }
++    }
++
++    for (unsigned int n = PLY_EXPORT_HAS_COLORS, c = 0; (components & n) && c != AI_MAX_NUMBER_OF_COLOR_SETS; n <<= 1, ++c) {
+         if (!c) {
+             mOutput << "property " << "uchar" << " red" << endl;
+             mOutput << "property " << "uchar" << " green" << endl;
+@@ -239,12 +249,7 @@ void PlyExporter::WriteMeshVerts(const aiMesh* m, unsigned int components) {
+ 
+         for (unsigned int n = PLY_EXPORT_HAS_TEXCOORDS, c = 0; (components & n) && c != AI_MAX_NUMBER_OF_TEXTURECOORDS; n <<= 1, ++c) {
+             if (m->HasTextureCoords(c)) {
+-                if (m->mNumUVComponents[c] == 3) {
+-                    mOutput <<
+-                        " " << m->mTextureCoords[c][i].x <<
+-                        " " << m->mTextureCoords[c][i].y <<
+-                        " " << m->mTextureCoords[c][i].z;
+-                } else if (m->mNumUVComponents[c] == 2) {
++                if (m->mNumUVComponents[c] == 2 || m->mNumUVComponents[c] == 3) {
+                     mOutput <<
+                         " " << m->mTextureCoords[c][i].x <<
+                         " " << m->mTextureCoords[c][i].y;
+@@ -264,7 +269,7 @@ void PlyExporter::WriteMeshVerts(const aiMesh* m, unsigned int components) {
+                     " " << (int)(m->mColors[c][i].b * 255) <<
+                     " " << (int)(m->mColors[c][i].a * 255);
+             } else {
+-                mOutput << " 0 0 0";
++                mOutput << " 0 0 0 0";
+             }
+         }
+ 
+diff --git a/code/AssetLib/X/XFileExporter.cpp b/code/AssetLib/X/XFileExporter.cpp
+index 0fa670479..bca1eb507 100644
+--- a/code/AssetLib/X/XFileExporter.cpp
++++ b/code/AssetLib/X/XFileExporter.cpp
+@@ -57,6 +57,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include <assimp/scene.h>
+ #include <assimp/light.h>
+ 
++#include <cstring>
+ #include <ctime>
+ #include <set>
+ #include <memory>
+@@ -138,17 +139,8 @@ void XFileExporter::WriteFile()
+     // entry of writing the file
+     WriteHeader();
+ 
+-    mOutput << startstr << "Frame DXCC_ROOT {" << endstr;
+-    PushTag();
+-
+-    aiMatrix4x4 I; // identity
+-    WriteFrameTransform(I);
+-
++    // The root is the single top frame, so readers get it back as their root node.
+     WriteNode(mScene->mRootNode);
+-    PopTag();
+-
+-    mOutput << startstr << "}" << endstr;
+-
+ }
+ 
+ // ------------------------------------------------------------------------------------------------
+@@ -391,7 +383,9 @@ void XFileExporter::WriteMesh(aiMesh* mesh)
+             else
+                 mOutput << ";" << endstr;
+         }
+-        mOutput << startstr << "Material {" << endstr;
++        aiString matName;
++        mat->Get(AI_MATKEY_NAME, matName);
++        mOutput << startstr << "Material " << toXFileString(matName) << " {" << endstr;
+         PushTag();
+         mOutput << startstr << "1.0; 1.0; 1.0; 1.000000;;" << endstr;
+         mOutput << startstr << "1.000000;" << endstr; // power
+@@ -416,8 +410,8 @@ void XFileExporter::WriteMesh(aiMesh* mesh)
+         for (size_t a = 0; a < mesh->mNumVertices; a++)
+         {
+             aiVector3D &v = mesh->mNormals[a];
+-            // because we have a LHS and also changed wth winding, we need to invert the normals again
+-            mOutput << startstr << -v[0] << ";"<< -v[1] << ";" << -v[2] << ";";
++            // MakeLeftHanded already mirrored the normals; reversing the winding does not change their direction
++            mOutput << startstr << v[0] << ";"<< v[1] << ";" << v[2] << ";";
+             if (a < mesh->mNumVertices - 1)
+                 mOutput << "," << endstr;
+             else
+@@ -512,9 +506,9 @@ std::string XFileExporter::toXFileString(aiString &name)
+     std::string str = pref + std::string(name.C_Str());
+     for (int i=0; i < (int) str.length(); ++i)
+     {
+-        if ((str[i] >= '0' && str[i] <= '9') || // 0-9
+-            (str[i] >= 'A' && str[i] <= 'Z') || // A-Z
+-            (str[i] >= 'a' && str[i] <= 'z')) // a-z
++        // the text parser reads a name up to whitespace or ;,{} and treats // and # as comments
++        const unsigned char c = static_cast<unsigned char>(str[i]);
++        if (c > ' ' && c < 0x7f && !std::strchr(";,{}\"/#<>", c))
+             continue;
+         str[i] = '_';
+     }
+diff --git a/code/AssetLib/X3D/X3DExporter.cpp b/code/AssetLib/X3D/X3DExporter.cpp
+index 0c5ed1268..b18b0340e 100644
+--- a/code/AssetLib/X3D/X3DExporter.cpp
++++ b/code/AssetLib/X3D/X3DExporter.cpp
+@@ -227,7 +227,7 @@ void X3DExporter::Export_Node(const aiNode *pNode, const size_t pTabLevel) {
+     if (transform)
+         NodeHelper_OpenNode("Transform", pTabLevel, false, attr_list);
+     else
+-        NodeHelper_OpenNode("Group", pTabLevel);
++        NodeHelper_OpenNode("Group", pTabLevel, false, attr_list);
+ 
+     // Export metadata
+     if (pNode->mMetaData != nullptr) {
+diff --git a/code/AssetLib/X3D/X3DImporter.cpp b/code/AssetLib/X3D/X3DImporter.cpp
+index 84f8ce5de..1bb59715e 100644
+--- a/code/AssetLib/X3D/X3DImporter.cpp
++++ b/code/AssetLib/X3D/X3DImporter.cpp
+@@ -307,6 +307,21 @@ void X3DImporter::InternReadFile(const std::string &pFile, aiScene *pScene, IOSy
+ 
+         // create nodes tree
+         Postprocess_BuildNode(*mNodeElementCur, *pScene->mRootNode, mesh_list, mat_list, light_list);
++        // A <Scene> holding a single top node: use that node as the root instead of wrapping it.
++        aiNode *root = pScene->mRootNode;
++        if (root->mNumChildren == 1 && root->mNumMeshes == 0 && root->mTransformation.IsIdentity() &&
++                (root->mMetaData == nullptr || root->mChildren[0]->mMetaData == nullptr)) {
++            aiNode *top = root->mChildren[0];
++            root->mNumChildren = 0;
++            delete[] root->mChildren;
++            root->mChildren = nullptr;
++            if (top->mMetaData == nullptr) {
++                std::swap(top->mMetaData, root->mMetaData);
++            }
++            top->mParent = nullptr;
++            delete root;
++            pScene->mRootNode = top;
++        }
+         // copy needed data to scene
+         if (!mesh_list.empty()) {
+             std::list<aiMesh *>::const_iterator it = mesh_list.begin();
+diff --git a/code/AssetLib/X3D/X3DImporter_Group.cpp b/code/AssetLib/X3D/X3DImporter_Group.cpp
+index c2d7c562e..5ad692f33 100644
+--- a/code/AssetLib/X3D/X3DImporter_Group.cpp
++++ b/code/AssetLib/X3D/X3DImporter_Group.cpp
+@@ -79,8 +79,6 @@ void X3DImporter::startReadGroup(XmlNode &node) {
+         if (!def.empty()) mNodeElementCur->ID = def;
+         // in grouping set of nodes check X3DMetadataObject is not needed, because it is done in <Scene> parser function.
+ 
+-        // for empty element exit from node in that place
+-        if (isNodeEmpty(node)) ParseHelper_Node_Exit();
+     } // if(!use.empty()) else
+ }
+ 
+@@ -118,8 +116,6 @@ void X3DImporter::startReadStaticGroup(XmlNode &node) {
+         if (!def.empty()) mNodeElementCur->ID = def;
+         // in grouping set of nodes check X3DMetadataObject is not needed, because it is done in <Scene> parser function.
+ 
+-        // for empty element exit from node in that place
+-        if (isNodeEmpty(node)) ParseHelper_Node_Exit();
+     } // if(!use.empty()) else
+ }
+ 
+@@ -165,8 +161,6 @@ void X3DImporter::startReadSwitch(XmlNode &node) {
+         ((X3DNodeElementGroup *)mNodeElementCur)->Choice = whichChoice;
+         // in grouping set of nodes check X3DMetadataObject is not needed, because it is done in <Scene> parser function.
+ 
+-        // for empty element exit from node in that place
+-        if (isNodeEmpty(node)) ParseHelper_Node_Exit();
+     } // if(!use.empty()) else
+ }
+ 
+@@ -260,10 +254,6 @@ void X3DImporter::startReadTransform(XmlNode &node) {
+         ((X3DNodeElementGroup *)mNodeElementCur)->Transformation = matr;
+         // in grouping set of nodes check X3DMetadataObject is not needed, because it is done in <Scene> parser function.
+ 
+-        // for empty element exit from node in that place
+-        if (isNodeEmpty(node)) {
+-            ParseHelper_Node_Exit();
+-        }
+     } // if(!use.empty()) else
+ }
+ 
+diff --git a/code/AssetLib/X3D/X3DImporter_Postprocess.cpp b/code/AssetLib/X3D/X3DImporter_Postprocess.cpp
+index 8517aab25..2d23fd5ab 100644
+--- a/code/AssetLib/X3D/X3DImporter_Postprocess.cpp
++++ b/code/AssetLib/X3D/X3DImporter_Postprocess.cpp
+@@ -174,6 +174,17 @@ void X3DImporter::Postprocess_BuildMaterial(const X3DNodeElementBase &pNodeEleme
+     *pMaterial = new aiMaterial;
+     aiMaterial &taimat = **pMaterial; // creating alias for convenience.
+ 
++    // Assimp's X3D exporter names an <Appearance> "<material>_IDX_<n>".
++    if (!pNodeElement.ID.empty()) {
++        std::string name = pNodeElement.ID;
++        const std::string::size_type idx = name.rfind("_IDX_");
++        if (idx != std::string::npos && idx > 0 && name.find_first_not_of("0123456789", idx + 5) == std::string::npos) {
++            name.resize(idx);
++        }
++        aiString aiName(name);
++        taimat.AddProperty(&aiName, AI_MATKEY_NAME);
++    }
++
+     // at this point pNodeElement point to <Appearance> node. Walk through childs and add all stored data.
+     for (std::list<X3DNodeElementBase *>::const_iterator el_it = pNodeElement.Children.begin(); el_it != pNodeElement.Children.end(); ++el_it) {
+         if ((*el_it)->Type == X3DElemType::ENET_Material) {
+diff --git a/code/AssetLib/X3D/X3DXmlHelper.cpp b/code/AssetLib/X3D/X3DXmlHelper.cpp
+index 7ed2e8237..4e3301be2 100644
+--- a/code/AssetLib/X3D/X3DXmlHelper.cpp
++++ b/code/AssetLib/X3D/X3DXmlHelper.cpp
+@@ -147,7 +147,9 @@ bool X3DXmlHelper::getStringListAttribute(XmlNode &node, const char *attributeNa
+                         currentConcat += " " + s;
+                     }
+                 } else {
+-                    if (s[0] == '"') {
++                    if (s[0] == '"' && s.length() > 1 && *(s.rbegin()) == '"') {
++                        stringList.push_back(s.substr(1, s.length() - 2));
++                    } else if (s[0] == '"') {
+                         currentConcat = s.substr(1);
+                         inQuotes = true;
+                     } else {
+diff --git a/code/AssetLib/glTF/glTFAssetWriter.inl b/code/AssetLib/glTF/glTFAssetWriter.inl
+index 0237de051..96234d30a 100644
+--- a/code/AssetLib/glTF/glTFAssetWriter.inl
++++ b/code/AssetLib/glTF/glTFAssetWriter.inl
+@@ -591,11 +591,11 @@ namespace glTF {
+         //
+ 
+         size_t bodyLength = 0;
++        size_t bodyOffset = sizeof(GLB_Header) + sceneLength;
+         if (Ref<Buffer> b = mAsset.GetBodyBuffer()) {
+             bodyLength = b->byteLength;
+ 
+             if (bodyLength > 0) {
+-                size_t bodyOffset = sizeof(GLB_Header) + sceneLength;
+                 bodyOffset = (bodyOffset + 3) & ~3; // Round up to next multiple of 4
+ 
+                 outfile->Seek(bodyOffset, aiOrigin_SET);
+@@ -616,7 +616,8 @@ namespace glTF {
+         header.version = 1;
+         AI_SWAP4(header.version);
+ 
+-        header.length = uint32_t(sizeof(header) + sceneLength + bodyLength);
++        // The reader finds the body at the aligned offset, so the length includes the padding before it.
++        header.length = uint32_t(bodyOffset + bodyLength);
+         AI_SWAP4(header.length);
+ 
+         header.sceneLength = uint32_t(sceneLength);
