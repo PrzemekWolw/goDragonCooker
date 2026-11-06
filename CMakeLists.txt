@@ -71,6 +71,16 @@ else()
     set(GDC_DRACO_TARGET draco)
 endif()
 
+# The bundled zlib (assimp contrib/zlib) ships a broken `#define fdopen(fd,mode) NULL`
+# macro for TARGET_OS_MAC in zutil.h. On Apple platforms TARGET_OS_MAC is always defined,
+# so the macro rewrites the real fdopen() declaration in <stdio.h> into a syntax error
+# under newer Apple Clang / the Xcode 16.4 SDK. Defining fdopen as an identity macro makes
+# the `#ifndef fdopen` guard in zutil.h skip the broken definition, while leaving the real
+# function declaration and any call sites untouched. Harmless if upstream ever fixes it.
+if(APPLE)
+    target_compile_definitions(zlibstatic PRIVATE fdopen=fdopen)
+endif()
+
 add_library(gdc_headers INTERFACE)
 target_include_directories(gdc_headers SYSTEM INTERFACE
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/bcdec"
