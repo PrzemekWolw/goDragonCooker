@@ -92,17 +92,36 @@ void matGenTabInit()
     matGenTab.settings.suffixes = defaultTextureEntries;
 }
 
+// ".data.png" -> ".dataR.png". Empty when the name is not a .data texture.
+static std::string dataRName(const std::string& name)
+{
+    const std::string marker = ".data.";
+    const auto pos = name.rfind(marker);
+    if (pos == std::string::npos) {
+        return "";
+    }
+    std::string out = name;
+    out.insert(pos + marker.size() - 1, "R");
+    return out;
+}
+
 static bool matchTex(const std::string& name, const std::vector<TexEntry>& entries, std::string& base,
                      std::string& key)
 {
     const std::string lower = toLower(name);
     for (const TexEntry& entry : entries) {
         const std::string suffix = toLower(entry.suffix + entry.ext);
-        if (hasSuffix(lower, suffix)) {
-            base = name.substr(0, name.size() - suffix.size());
-            key = entry.stageKey;
-            return true;
+        std::string matched = suffix;
+        if (!hasSuffix(lower, suffix)) {
+            const std::string alt = dataRName(suffix);
+            if (alt.empty() || !hasSuffix(lower, toLower(alt))) {
+                continue;
+            }
+            matched = alt;
         }
+        base = name.substr(0, name.size() - matched.size());
+        key = entry.stageKey;
+        return true;
     }
     return false;
 }
@@ -346,7 +365,12 @@ static void runMatGen(std::string directory, MatGenSettings settings)
                     if (!textures.count(baseStageKey)) {
                         continue;
                     }
-                    const auto it = fileNames.find(toLower(base + detail.suffix + detail.ext));
+                    const std::string wanted = base + detail.suffix + detail.ext;
+                    auto it = fileNames.find(toLower(wanted));
+                    if (it == fileNames.end()) {
+                        const std::string alt = dataRName(wanted);
+                        it = alt.empty() ? fileNames.end() : fileNames.find(toLower(alt));
+                    }
                     if (it != fileNames.end()) {
                         textures[detail.stageKey] = it->second;
                     }
@@ -410,7 +434,8 @@ static const PatternInfo patterns[] = {
 };
 
 static const std::vector<std::string> allExtOpts = {
-    ".color.png", ".normal.png", ".data.png", ".color.jpg", ".normal.jpg", ".data.jpg",
+    ".color.png", ".normal.png", ".data.png", ".dataR.png",
+    ".color.jpg", ".normal.jpg", ".data.jpg", ".dataR.jpg",
 };
 
 static int extIndex(const std::string& ext)

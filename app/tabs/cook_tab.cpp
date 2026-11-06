@@ -32,7 +32,7 @@ struct CookValidation {
 struct CookTab {
     TaskState task;
     std::string directory;
-    bool autoDetectFmt = true;
+    bool autoDetectFmt = false;
     CookValidation validation;
 };
 

@@ -9,8 +9,8 @@ std::string textureRole(const std::string& name)
         return "";
     }
     const std::string ext = u8str(u8path(lower).extension());
-    for (const char* role : {"color", "data", "normal"}) {
-        if (hasSuffix(lower, "." + std::string(role) + ext)) {
+    for (const char* role : {"color", "dataR", "data", "normal"}) {
+        if (hasSuffix(lower, toLower("." + std::string(role) + ext))) {
             return role;
         }
     }
@@ -28,9 +28,9 @@ bool isExpensiveCodec(const std::string& format)
     return hasPrefix(format, "BC6H_") || hasPrefix(format, "BC7_");
 }
 
-std::string resolveDataFormat(const ImgInfo& info, bool autoDetect)
+std::string resolveDataFormat(const ImgInfo& info, bool assumeGrayscale)
 {
-    if (autoDetect || info.colorType == ColorType::Grayscale || info.colorType == ColorType::GrayAlpha) {
+    if (assumeGrayscale || info.colorType == ColorType::Grayscale || info.colorType == ColorType::GrayAlpha) {
         return "BC4_UNORM";
     }
     return "BC7_UNORM";
@@ -54,6 +54,9 @@ bool makeCookJob(const std::string& srcFile, const std::string& role, const ImgI
         job.format = "BC7_UNORM_SRGB";
         job.srgb = job.sepa = true;
         job.inputSRGB = img.colorSpace != ColorSpace::Linear;
+    } else if (role == "dataR") {
+        job.format = "BC4_UNORM";
+        job.ignoreSRGB = true;
     } else if (role == "data") {
         job.format = isFloatHDR(srcFile) ? "BC7_UNORM" : resolveDataFormat(img, autoDetectFmt);
         job.ignoreSRGB = true;

@@ -6,12 +6,12 @@
 #include "texture/imageheader.h"
 #include "texture/vulkan_codec.h"
 
-// Matches the file suffix to a material slot (color/data/normal). Returns empty if no role matched.
+// Matches the file suffix to a material slot (color/data/dataR/normal). Returns empty if no role matched.
 std::string textureRole(const std::string& name);
 bool isFloatHDR(const std::string& name);
 bool isExpensiveCodec(const std::string& format);
-// autoDetect (legacy default) always picks grayscale BC4; otherwise grayscale sources get BC4 and color sources BC7.
-std::string resolveDataFormat(const ImgInfo& info, bool autoDetect);
+// assumeGrayscale forces BC4 for .data. Grayscale .data is BC4 either way; color .data is BC7. .dataR is always BC4.
+std::string resolveDataFormat(const ImgInfo& info, bool assumeGrayscale);
 const char* colorSpaceName(ColorSpace space);
 // Fills format and color flags for a source with the given role. Returns false for an unknown role.
 bool makeCookJob(const std::string& srcFile, const std::string& role, const ImgInfo& img, bool autoDetectFmt,
