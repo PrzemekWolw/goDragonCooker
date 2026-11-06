@@ -234,6 +234,7 @@ std::vector<std::string> platformGPUInfo()
         }
     }
     std::sort(files.begin(), files.end());
+    int gpuCount = 0;
     for (const fs::path& file : files) {
         std::string driver, pciID;
         for (const std::string& line : readLines(file)) {
@@ -243,9 +244,13 @@ std::vector<std::string> platformGPUInfo()
                 pciID = line.substr(7);
             }
         }
+        if (pciID.empty()) {
+            continue;
+        }
         report.push_back(format("GPU: driver %s, PCI %s", driver.c_str(), pciID.c_str()));
+        ++gpuCount;
     }
-    if (files.empty()) {
+    if (gpuCount == 0) {
         report.push_back("gdc.gpu.noAdapters");
     }
     return report;

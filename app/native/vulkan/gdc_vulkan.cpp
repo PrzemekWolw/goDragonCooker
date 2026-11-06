@@ -231,6 +231,56 @@ VkInstance createInstance(std::string& error)
     return instance;
 }
 
+uint32_t findMemoryType(VkPhysicalDevice device, uint32_t bits, VkMemoryPropertyFlags flags)
+{
+    VkPhysicalDeviceMemoryProperties properties{};
+    vkGetPhysicalDeviceMemoryProperties(device, &properties);
+    for (uint32_t i = 0; i < properties.memoryTypeCount; ++i) {
+        if ((bits & (1u << i)) && (properties.memoryTypes[i].propertyFlags & flags) == flags)
+            return i;
+    }
+    return UINT32_MAX;
+}
+
+uint32_t findComputeQueueFamily(VkPhysicalDevice device)
+{
+    uint32_t count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(count);
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &count, families.data());
+    for (uint32_t i = 0; i < count; ++i) {
+        if (families[i].queueFlags & VK_QUEUE_COMPUTE_BIT)
+            return i;
+    }
+    return UINT32_MAX;
+}
+
+bool supportsCompressonator(VkPhysicalDevice device)
+{
+    if (findComputeQueueFamily(device) == UINT32_MAX)
+        return false;
+
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(device, &properties);
+    if (properties.limits.maxComputeWorkGroupInvocations < 64
+        || properties.limits.maxComputeWorkGroupSize[0] < 64)
+        return false;
+
+    VkFormatProperties format{};
+    vkGetPhysicalDeviceFormatProperties(device, VK_FORMAT_R32G32B32A32_SFLOAT, &format);
+    const VkFormatFeatureFlags imageFeatures =
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+    if ((format.optimalTilingFeatures & imageFeatures) != imageFeatures)
+        return false;
+
+    return findMemoryType(device, UINT32_MAX, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != UINT32_MAX
+        && findMemoryType(
+               device,
+               UINT32_MAX,
+               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+            != UINT32_MAX;
+}
+
 std::vector<VkPhysicalDevice> enumerateDevices(VkInstance instance, std::string& error)
 {
     uint32_t count = 0;
@@ -239,6 +289,11 @@ std::vector<VkPhysicalDevice> enumerateDevices(VkInstance instance, std::string&
     std::vector<VkPhysicalDevice> devices(count);
     if (count && !check(vkEnumeratePhysicalDevices(instance, &count, devices.data()), "vkEnumeratePhysicalDevices", error))
         return {};
+    devices.erase(
+        std::remove_if(devices.begin(), devices.end(), [](VkPhysicalDevice device) {
+            return !supportsCompressonator(device);
+        }),
+        devices.end());
     return devices;
 }
 
@@ -265,17 +320,6 @@ int selectDevice(const std::vector<VkPhysicalDevice>& devices, int requested)
         }
     }
     return best;
-}
-
-uint32_t findMemoryType(VkPhysicalDevice device, uint32_t bits, VkMemoryPropertyFlags flags)
-{
-    VkPhysicalDeviceMemoryProperties properties{};
-    vkGetPhysicalDeviceMemoryProperties(device, &properties);
-    for (uint32_t i = 0; i < properties.memoryTypeCount; ++i) {
-        if ((bits & (1u << i)) && (properties.memoryTypes[i].propertyFlags & flags) == flags)
-            return i;
-    }
-    return UINT32_MAX;
 }
 
 bool createBuffer(
@@ -1532,21 +1576,7 @@ gdc_vulkan_context* gdc_vulkan_create(
         context.physicalDevice = devices[static_cast<size_t>(selected)];
     }
     {
-        uint32_t count = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(context.physicalDevice, &count, nullptr);
-        std::vector<VkQueueFamilyProperties> families(count);
-        vkGetPhysicalDeviceQueueFamilyProperties(context.physicalDevice, &count, families.data());
-        context.queueFamily = UINT32_MAX;
-        for (uint32_t i = 0; i < count; ++i) {
-            if (families[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
-                context.queueFamily = i;
-                break;
-            }
-        }
-        if (context.queueFamily == UINT32_MAX) {
-            message = "selected Vulkan device has no compute queue";
-            goto failed;
-        }
+        context.queueFamily = findComputeQueueFamily(context.physicalDevice);
     }
     {
         float priority = 1.0f;
