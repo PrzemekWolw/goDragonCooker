@@ -13,6 +13,7 @@
 
 #include "core/platform.h"
 #include "core/strings.h"
+#include "model/assimp/ai_tangents.h"
 #include "model/axis.h"
 #include "model/draco/draco_gltf.h"
 #include "model/ts/ts_io.h"
@@ -399,6 +400,11 @@ bool writeAssimp(const aiScene& scene, const Format& target, const nlohmann::jso
     } else if (target.id == "gltf2" || target.id == "gltf1") {
         owned.reset(gltfScene(scene));
         out = owned.get();
+        if (target.id == "gltf2") {
+            if (const unsigned added = addGameTangents(*owned)) {
+                r.log.push_back(format("tangents: added game tangents to %u mesh(es)", added));
+            }
+        }
     } else if (target.id == "fbx") {
         owned.reset(fbxScene(scene));
         out = owned.get();
@@ -564,6 +570,9 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
         if (writtenScene && scene) {
             checkGameLod(r.report, target.id, *writtenScene, *scene, caps.hierarchy);
             checkSeams(r.report, *writtenScene, *scene, toleranceFor(target, settings).posRel);
+            if (caps.tangents) {
+                checkTangents(r.report, *writtenScene, *scene);
+            }
         }
     }
     r.validated = true;

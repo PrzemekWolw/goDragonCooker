@@ -48,6 +48,10 @@ void checkGameLod(ValidationReport& report, const std::string& formatId, const a
 
 void checkSeams(ValidationReport& report, const aiScene& written, const aiScene& source, double posRel);
 
+// A source without tangents leaves them to the game, which derives them inverted from Assimp. The written meshes
+// must carry tangents whose handedness matches the game's own. Sources that carry tangents keep them as authored.
+void checkTangents(ValidationReport& report, const aiScene& written, const aiScene& source);
+
 Capabilities intersect(const Capabilities& a, const Capabilities& b);
 
 } // namespace model

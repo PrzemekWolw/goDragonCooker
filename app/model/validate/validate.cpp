@@ -13,6 +13,7 @@
 #include <assimp/scene.h>
 
 #include "core/strings.h"
+#include "model/assimp/ai_tangents.h"
 
 namespace model {
 namespace {
@@ -633,6 +634,58 @@ void checkSeams(ValidationReport& report, const aiScene& written, const aiScene&
     }
     if (!split && !(more && opened)) {
         report.lines.push_back("Seams: coincident vertices between material groups stay coincident");
+    }
+}
+
+void checkTangents(ValidationReport& report, const aiScene& written, const aiScene& source)
+{
+    for (unsigned m = 0; m < source.mNumMeshes; ++m) {
+        if (source.mMeshes[m]->HasTangentsAndBitangents()) {
+            return;
+        }
+    }
+    size_t checked = 0, flipped = 0, missing = 0;
+    std::vector<aiVector3D> tangents;
+    std::vector<float> handedness;
+    for (unsigned m = 0; m < written.mNumMeshes; ++m) {
+        const aiMesh& mesh = *written.mMeshes[m];
+        if (!gameTangents(mesh, tangents, handedness)) {
+            continue;
+        }
+        if (!mesh.HasTangentsAndBitangents()) {
+            missing += mesh.mNumVertices;
+            continue;
+        }
+        for (unsigned v = 0; v < mesh.mNumVertices; ++v) {
+            // Where the UVs barely span a direction, quantization turns the whole frame; there is nothing to compare.
+            if (std::fabs(handedness[v]) < 0.5f || mesh.mTangents[v] * tangents[v] < 0.9f) {
+                continue;
+            }
+            ++checked;
+            const bool inverted = ((mesh.mNormals[v] ^ mesh.mTangents[v]) * mesh.mBitangents[v]) < 0.0f;
+            flipped += inverted != (handedness[v] < 0.0f);
+        }
+    }
+    report.json["tangents"] = {{"checked", checked}, {"flipped", flipped}, {"missing", missing}};
+    auto fail = [&](const std::string& text) {
+        if (int(Verdict::Fail) > int(report.verdict)) {
+            report.verdict = Verdict::Fail;
+        }
+        report.lines.push_back(text);
+        report.json["verdict"] = verdictName(report.verdict);
+    };
+    if (missing) {
+        fail(format("FAIL TANGENTS: %zu vertices have no tangents. The game derives them itself with the bitangent inverted, "
+                    "which shows normal maps upside down.",
+                    missing));
+    }
+    if (flipped * 4 > checked) {
+        fail(format("FAIL TANGENTS: %zu of %zu vertices have the bitangent handedness inverted against the game's. "
+                    "Normal maps would show upside down.",
+                    flipped, checked));
+    }
+    if (!missing && flipped * 4 <= checked) {
+        report.lines.push_back("Tangents: handedness matches the game's");
     }
 }
 
