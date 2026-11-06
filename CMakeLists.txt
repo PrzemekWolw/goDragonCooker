@@ -108,13 +108,13 @@ set(ASSIMP_BUILD_DRACO_STATIC ON CACHE BOOL "" FORCE)
 # Exporter fixes that are not on assimp/assimp. CI checks out the upstream commit, so apply them here.
 set(_assimp_patch "${CMAKE_CURRENT_SOURCE_DIR}/third_party/assimp-exporters.patch")
 execute_process(
-    COMMAND git apply --reverse --check "${_assimp_patch}"
+    COMMAND git apply --ignore-whitespace --reverse --check "${_assimp_patch}"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/assimp"
     RESULT_VARIABLE _assimp_already
     OUTPUT_QUIET ERROR_QUIET)
 if(NOT _assimp_already EQUAL 0)
     execute_process(
-        COMMAND git apply "${_assimp_patch}"
+        COMMAND git apply --ignore-whitespace "${_assimp_patch}"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/assimp"
         RESULT_VARIABLE _assimp_apply
         ERROR_VARIABLE _assimp_err)
