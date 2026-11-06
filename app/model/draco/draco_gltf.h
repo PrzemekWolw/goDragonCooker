@@ -6,7 +6,6 @@ namespace model {
 
 struct DracoOptions {
     int level = 10; // 0..10, higher is smaller and slower
-    int qPos = 20;  // the coarsest grid whose error stays inside the validator's float-precision position check
     int qNormal = 12;
     int qUv = 16;
     int qColor = 10;

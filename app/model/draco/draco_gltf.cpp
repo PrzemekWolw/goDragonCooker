@@ -4,7 +4,6 @@
 #include <cstring>
 #include <map>
 #include <memory>
-#include <set>
 
 #include <nlohmann/json.hpp>
 
@@ -192,45 +191,7 @@ struct Encoded {
     size_t faces = 0;
 };
 
-struct PosGrid {
-    float origin[3] = {0, 0, 0};
-    float range = 0;
-};
-
-PosGrid meshPosGrid(const Document& doc, const json& mesh)
-{
-    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
-    for (const json& p : mesh.value("primitives", json::array())) {
-        const json attrs = p.value("attributes", json::object());
-        if (!attrs.contains("POSITION")) {
-            continue;
-        }
-        const json& acc = doc.gltf["accessors"][attrs["POSITION"].get<size_t>()];
-        std::vector<uint8_t> bytes;
-        size_t elemSize = 0;
-        if (acc.value("componentType", 0) != 5126 || acc.value("type", std::string()) != "VEC3" || !accessorBytes(doc, acc, bytes, elemSize)) {
-            continue;
-        }
-        for (size_t i = 0; i + 12 <= bytes.size(); i += 12) {
-            float v[3];
-            std::memcpy(v, &bytes[i], 12);
-            for (int k = 0; k < 3; ++k) {
-                lo[k] = std::min(lo[k], v[k]);
-                hi[k] = std::max(hi[k], v[k]);
-            }
-        }
-    }
-    PosGrid g;
-    for (int k = 0; k < 3; ++k) {
-        if (lo[k] <= hi[k]) {
-            g.origin[k] = lo[k];
-            g.range = std::max(g.range, hi[k] - lo[k]);
-        }
-    }
-    return g;
-}
-
-bool encodePrimitive(const Document& doc, const json& prim, const DracoOptions& o, const PosGrid& grid, Encoded& enc)
+bool encodePrimitive(const Document& doc, const json& prim, const DracoOptions& o, Encoded& enc)
 {
     const json& accessors = doc.gltf["accessors"];
     const json& attrs = prim["attributes"];
@@ -262,7 +223,6 @@ bool encodePrimitive(const Document& doc, const json& prim, const DracoOptions& 
         int bits = 0;
         if (name == "POSITION") {
             type = draco::GeometryAttribute::POSITION;
-            bits = o.qPos;
         } else if (name == "NORMAL") {
             type = draco::GeometryAttribute::NORMAL;
             bits = o.qNormal;
@@ -334,15 +294,7 @@ bool encodePrimitive(const Document& doc, const json& prim, const DracoOptions& 
         if (bits <= 0) {
             continue;
         }
-        if (mesh.attribute(id)->attribute_type() == draco::GeometryAttribute::POSITION && grid.range > 0) {
-            encoder.SetAttributeExplicitQuantization(id, bits, 3, grid.origin, grid.range);
-        } else {
-            encoder.SetAttributeQuantization(id, bits);
-        }
-        // Draco's geometric normal prediction decodes wrong normals from fine position quantization.
-        if (mesh.attribute(id)->attribute_type() == draco::GeometryAttribute::NORMAL) {
-            encoder.SetAttributePredictionScheme(id, draco::PREDICTION_DIFFERENCE);
-        }
+        encoder.SetAttributeQuantization(id, bits);
     }
     draco::EncoderBuffer buffer;
     if (!encoder.EncodeToBuffer(&buffer).ok()) {
@@ -429,7 +381,6 @@ bool dracoCompressGltf(const std::string& path, const DracoOptions& options, std
         if (!m.contains("primitives")) {
             continue;
         }
-        const PosGrid grid = meshPosGrid(doc, m);
         total += m["primitives"].size();
         // All triangle primitives of a mesh or none: a raw one next to quantized ones no longer lines up with them.
         // Lines and points stay raw; Draco only encodes triangles.
@@ -448,10 +399,10 @@ bool dracoCompressGltf(const std::string& path, const DracoOptions& options, std
                 ok = ok && uses[p["indices"].get<size_t>()] == 1;
             }
             Encoded enc;
-            all = ok && encodePrimitive(doc, p, options, grid, enc);
+            all = ok && encodePrimitive(doc, p, options, enc);
             encoded.push_back({pi, std::move(enc)});
         }
-        if (!all) {
+        if (!all || encoded.empty()) {
             continue;
         }
         for (auto& [pi, enc] : encoded) {

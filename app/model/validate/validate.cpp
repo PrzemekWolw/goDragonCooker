@@ -314,15 +314,13 @@ Tolerance toleranceFor(const Format& target, const nlohmann::json& settings)
 {
     Tolerance t;
     if (target.id == "gltf2" && settingBool(target, settings, "draco")) {
-        // Quantized to 2^bits steps over the attribute range; allow two steps.
-        t.posRel = std::max(t.posRel, 2.0 / double(1u << settingValue(target, settings, "qPos")));
+        // Quantized to 2^bits steps over the attribute range; allow two steps. Positions are not quantized.
         // Octahedral normals: one step is about 360 / 2^bits degrees.
         t.normalDeg = std::max(t.normalDeg, 2.0 * 360.0 / double(1u << settingValue(target, settings, "qNormal")));
         t.uv = std::max(t.uv, 2.0 / double(1u << settingValue(target, settings, "qUv")));
         t.uvRangeRelative = true;
         t.color = std::max(t.color, int(std::ceil(2.0 * 255.0 / double(1u << settingValue(target, settings, "qColor")))));
         t.tangentDeg = std::max(t.tangentDeg, 2.0 * 180.0 / double(1u << settingValue(target, settings, "qGeneric")));
-        t.transRel = std::max(t.transRel, t.posRel);
     }
     if (target.isTs) {
         t.rotDeg = std::max(t.rotDeg, 0.02); // Quat16 storage
@@ -922,22 +920,11 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
             if (maxDist > posTol * 10.0 && (ab.outliers || ba.outliers || matchedFrac < 0.999)) {
                 v = Verdict::Fail;
             }
-            // Whatever the quantization setting allows, a vertex that left its place by more than the float
-            // precision of the model's coordinates is a visible change.
-            const double maxAbs = std::max({std::fabs(double(src.bounds.min.x)), std::fabs(double(src.bounds.min.y)), std::fabs(double(src.bounds.min.z)),
-                                            std::fabs(double(src.bounds.max.x)), std::fabs(double(src.bounds.max.y)), std::fabs(double(src.bounds.max.z))});
-            const double exactPos = 8.0 * maxAbs * 1.2e-7 + diag * 4e-6; // a few float roundings through node transforms
-            std::string moved;
-            if (maxDist > exactPos) {
-                v = std::max(v, maxDist > exactPos * 10.0 ? Verdict::Fail : Verdict::Warn);
-                moved = format(", vertices moved up to %.3g where float precision is %.3g", maxDist, exactPos);
-            }
-            g["positionExact"] = exactPos;
             std::string text = format("geometry: %zu/%zu triangles matched (%zu extra", match.pairs.size(), comparable, match.unmatchedB);
             if (match.droppedDegenerate) {
                 text += format(", %zu below tolerance skipped", match.droppedDegenerate);
             }
-            line(v, tag + text + format("), max %.3g (%.2g of bbox), rms %.3g", maxDist, maxDist / diag, std::max(ab.dist.rms(), ba.dist.rms())) + moved);
+            line(v, tag + text + format("), max %.3g (%.2g of bbox), rms %.3g", maxDist, maxDist / diag, std::max(ab.dist.rms(), ba.dist.rms())));
         }
 
         size_t flipped = 0;

@@ -24,7 +24,7 @@
 namespace {
 
 // Listed first in the target dropdown; the rest follow by label.
-const char* const kMainTargets[] = {"cdae", "dts", "collada", "gltf2", "fbx", "obj"};
+const char* const kMainTargets[] = {"gltf2", "cdae", "dts", "collada", "fbx", "obj"};
 
 struct ModelSettings {
     std::string directory;
@@ -34,7 +34,7 @@ struct ModelSettings {
     bool validate = true;
     bool verboseLog = false;
     std::set<std::string> sourceExts;
-    std::string target = "cdae";
+    std::string target = "gltf2";
     std::map<std::string, nlohmann::json> formatSettings; // target id -> values
 };
 

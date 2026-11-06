@@ -543,7 +543,6 @@ bool writeAssimp(const aiScene& scene, const Format& target, const nlohmann::jso
     if (target.id == "gltf2" && settingBool(target, settings, "draco")) {
         DracoOptions d;
         d.level = settingValue(target, settings, "dracoLevel");
-        d.qPos = settingValue(target, settings, "qPos");
         d.qNormal = settingValue(target, settings, "qNormal");
         d.qUv = settingValue(target, settings, "qUv");
         d.qColor = settingValue(target, settings, "qColor");

@@ -196,8 +196,6 @@ struct Registry {
                 int def;
                 const char* tip;
             } bits[] = {
-                {"qPos", "gdc.format.qPos.label", 20,
-                 "gdc.format.qPos.tooltip"},
                 {"qNormal", "gdc.format.qNormal.label", 12,
                  "gdc.format.qNormal.tooltip"},
                 {"qUv", "gdc.format.qUv.label", 16,
