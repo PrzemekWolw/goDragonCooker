@@ -12,6 +12,7 @@
 
 #include "core/platform.h"
 #include "core/strings.h"
+#include "model/axis.h"
 #include "model/draco/draco_gltf.h"
 #include "model/ts/ts_io.h"
 #include "model/validate/summary.h"
@@ -21,7 +22,7 @@ namespace {
 
 // The COLLADA exporter writes <up_axis>Z_UP</up_axis> and drops the root when the root holds
 // exactly this rotation, so the file keeps the game's Z-up coordinates unchanged.
-aiMatrix4x4 colladaZUpRoot() { return aiMatrix4x4(1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1); }
+aiMatrix4x4 colladaZUpRoot() { return zUpToYUp(); }
 
 // The COLLADA exporter writes key times as seconds without applying mTicksPerSecond.
 void animationsToSeconds(aiScene& scene)
@@ -74,6 +75,23 @@ aiScene* colladaScene(const aiScene& in)
     // Metadata lives on the scene root; keep it where the reader looks for it.
     std::swap(wrapper->mMetaData, root->mMetaData);
     return copy;
+}
+
+// Y-up writers (glTF, FBX, OBJ, ...) store the scene rotated out of game space. The rotation goes on the root
+// node, or, for FBX whose exporter ignores the root's transform, on the old root below a fresh one.
+void applyYUpFrame(aiScene& scene, bool wrapRoot)
+{
+    aiNode* root = scene.mRootNode;
+    root->mTransformation = zUpToYUp() * root->mTransformation;
+    if (!wrapRoot) {
+        return;
+    }
+    aiNode* top = new aiNode("gdc_root");
+    top->mChildren = new aiNode*[1]{root};
+    top->mNumChildren = 1;
+    root->mParent = top;
+    scene.mRootNode = top;
+    std::swap(top->mMetaData, root->mMetaData);
 }
 
 // The glTF exporters give materials, meshes and nodes one id namespace and rename clashing nodes
@@ -229,6 +247,16 @@ bool writeAssimp(const aiScene& scene, const Format& target, const nlohmann::jso
         owned.reset(fbxScene(scene));
         out = owned.get();
     }
+    const WriterFrame frame = writerFrame(target.id);
+    if (frame.up == UpAxis::Y) {
+        if (!owned) {
+            aiScene* copy = nullptr;
+            Assimp::SceneCombiner::CopyScene(&copy, &scene);
+            owned.reset(copy);
+        }
+        applyYUpFrame(*owned, frame.wrapRoot);
+        out = owned.get();
+    }
     if (exporter.Export(out, target.exporterId(settings), path, 0, &props) != aiReturn_SUCCESS) {
         r.error = exporter.GetErrorString();
         if (r.error.empty()) {
@@ -310,6 +338,8 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
     }
     r.ok = true;
     r.log.push_back(format("wrote %s", sizeText(fileSize(outputPath)).c_str()));
+    r.log.push_back(format("up axis: source %s, written %s-up", source.upAxisNote().c_str(),
+                           target.isTs ? "Z" : upAxisName(writerFrame(target.id).up)));
 
     if (!options.validate) {
         return r;
@@ -361,6 +391,9 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
     }
     const Capabilities caps = targetCaps(target, settings);
     r.report = compareSummaries(before, after, caps, toleranceFor(target, settings));
+    if (!target.isTs) {
+        checkUpAxis(r.report, writerFrame(target.id).up, readRawFrame(outputPath), before);
+    }
     r.validated = true;
     return r;
 }

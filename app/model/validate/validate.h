@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "model/axis.h"
 #include "model/formats.h"
 #include "model/validate/summary.h"
 
@@ -38,6 +39,8 @@ struct ValidationReport {
 
 // Compares what the target can hold: `caps` is the intersection of source and target capabilities.
 ValidationReport compareSummaries(const Summary& source, const Summary& result, const Capabilities& caps, const Tolerance& tol);
+
+void checkUpAxis(ValidationReport& report, UpAxis expected, const RawFrame& raw, const Summary& source);
 
 Capabilities intersect(const Capabilities& a, const Capabilities& b);
 

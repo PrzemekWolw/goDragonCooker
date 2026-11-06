@@ -30,6 +30,8 @@ public:
     const std::string& path() const { return sourcePath; }
     // COLLADA without <animation_clip>: Assimp's per-channel animations belong to one sequence.
     bool wantsMergedAnimations() const { return mergeAnimations; }
+    // "Y-up (.glb) -> Z-up": the frame the file was read in and what it was converted to (game space).
+    const std::string& upAxisNote() const { return upNote; }
 
     const ts::Shape* shape(const ts::AiToTsOptions& options, std::vector<std::string>& warnings, std::string& error);
     const aiScene* scene(const ts::TsToAiOptions& options, std::vector<std::string>& warnings);
@@ -38,6 +40,7 @@ private:
     std::string sourcePath;
     bool fromTs = false;
     bool mergeAnimations = false;
+    std::string upNote;
 
     std::optional<ts::Shape> loadedShape;
     std::unique_ptr<aiScene> loadedScene;

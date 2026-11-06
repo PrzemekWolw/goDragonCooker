@@ -325,6 +325,63 @@ Tolerance toleranceFor(const Format& target, const nlohmann::json& settings)
     return t;
 }
 
+void checkUpAxis(ValidationReport& rep, UpAxis expected, const RawFrame& raw, const Summary& source)
+{
+    auto line = [&](Verdict v, const std::string& text) {
+        if (int(v) > int(rep.verdict)) {
+            rep.verdict = v;
+        }
+        rep.lines.push_back(std::string(v == Verdict::Pass ? "" : v == Verdict::Warn ? "WARN " : "FAIL ") + text);
+    };
+    nlohmann::json& j = rep.json["upAxis"];
+    j["expected"] = upAxisName(expected);
+    if (!raw.ok) {
+        line(Verdict::Warn, "up axis: could not re-read the file to check it: " + raw.error);
+        j["checked"] = false;
+        rep.json["verdict"] = verdictName(rep.verdict);
+        return;
+    }
+    Verdict v = Verdict::Pass;
+    std::string text = format("up axis: %s-up", upAxisName(expected));
+    if (raw.declared) {
+        const bool match = *raw.declared == expected && !raw.declaredNegative;
+        text += format(", file declares %s%s up", raw.declaredNegative ? "-" : "", upAxisName(*raw.declared));
+        j["declared"] = std::string(raw.declaredNegative ? "-" : "") + upAxisName(*raw.declared);
+        if (!match) {
+            v = Verdict::Fail;
+            text += " (mismatch)";
+        }
+    }
+    if (raw.hasGeometry && !source.tris.empty()) {
+        const ts::Vec3 lo = source.bounds.min, hi = source.bounds.max;
+        ts::Vec3 wantMin = lo, wantMax = hi;
+        if (expected == UpAxis::Y) { // (x, y, z) -> (x, z, -y)
+            wantMin = {lo.x, lo.z, -hi.y};
+            wantMax = {hi.x, hi.z, -lo.y};
+        }
+        const double tol = 1e-3 * std::max(double(source.diagonal()), 1e-6);
+        const float d[6] = {raw.bounds.min.x - wantMin.x, raw.bounds.min.y - wantMin.y, raw.bounds.min.z - wantMin.z,
+                            raw.bounds.max.x - wantMax.x, raw.bounds.max.y - wantMax.y, raw.bounds.max.z - wantMax.z};
+        double worst = 0;
+        for (float x : d) {
+            worst = std::max(worst, double(std::fabs(x)));
+        }
+        j["extentsDeviation"] = worst;
+        if (worst > tol) {
+            v = Verdict::Fail;
+            text += format(", stored extents %.3g x %.3g x %.3g but %.3g x %.3g x %.3g expected",
+                           raw.bounds.max.x - raw.bounds.min.x, raw.bounds.max.y - raw.bounds.min.y,
+                           raw.bounds.max.z - raw.bounds.min.z, wantMax.x - wantMin.x, wantMax.y - wantMin.y,
+                           wantMax.z - wantMin.z);
+        } else {
+            text += ", stored extents match the game model";
+        }
+    }
+    line(v, text);
+    j["verdict"] = verdictName(v);
+    rep.json["verdict"] = verdictName(rep.verdict);
+}
+
 ValidationReport compareSummaries(const Summary& src, const Summary& dst, const Capabilities& caps, const Tolerance& tol)
 {
     ValidationReport rep;

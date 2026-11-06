@@ -10,6 +10,7 @@
 
 #include "core/platform.h"
 #include "core/strings.h"
+#include "model/axis.h"
 #include "model/formats.h"
 #include "model/ts/ts_io.h"
 
@@ -25,21 +26,6 @@ bool sameOptions(const ts::AiToTsOptions& a, const ts::AiToTsOptions& b)
 bool sameOptions(const ts::TsToAiOptions& a, const ts::TsToAiOptions& b)
 {
     return a.lodNames == b.lodNames && a.includeCollision == b.includeCollision && a.includeAnimations == b.includeAnimations;
-}
-
-enum class UpAxis { X, Y, Z };
-
-// The engine's COLLADA up-axis conversion (Y_UP: (-x, z, y), X_UP: (z, x, y)) as a matrix.
-aiMatrix4x4 upAxisMatrix(UpAxis up)
-{
-    switch (up) {
-    case UpAxis::Y:
-        return aiMatrix4x4(-1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1);
-    case UpAxis::X:
-        return aiMatrix4x4(0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1);
-    default:
-        return aiMatrix4x4();
-    }
 }
 
 // Undoes writer renames recorded under kOriginalNameKey, in nodes, bones and animation channels.
@@ -215,6 +201,7 @@ bool Model::load(const std::string& path, std::string& error, std::vector<std::s
         }
         loadedShape = std::move(shape);
         fromTs = true;
+        upNote = "Z-up (game)";
         return true;
     }
 
@@ -259,9 +246,19 @@ bool Model::load(const std::string& path, std::string& error, std::vector<std::s
     }
     restoreOriginalNames(*loadedScene);
     compactChannels(*loadedScene);
-    if (collada && up != UpAxis::Z) {
-        loadedScene->mRootNode->mTransformation = upAxisMatrix(up) * loadedScene->mRootNode->mTransformation;
-        warnings.push_back(format("COLLADA %s converted to Z-up like the game", up == UpAxis::Y ? "Y_UP" : "X_UP"));
+    if (collada) {
+        if (up != UpAxis::Z) {
+            loadedScene->mRootNode->mTransformation = colladaUpToZUp(up) * loadedScene->mRootNode->mTransformation;
+            warnings.push_back(format("COLLADA %s converted to Z-up like the game", up == UpAxis::Y ? "Y_UP" : "X_UP"));
+        }
+        upNote = format("%s-up (<up_axis>) -> Z-up", upAxisName(up));
+    } else {
+        // Assimp scenes are Y up unless the format is natively Z up; the game and the TS writers are Z up.
+        const UpAxis frame = importedUp(ext);
+        if (frame == UpAxis::Y) {
+            loadedScene->mRootNode->mTransformation = yUpToZUp() * loadedScene->mRootNode->mTransformation;
+        }
+        upNote = format("%s-up (%s) -> Z-up", upAxisName(frame), ext.c_str());
     }
     fromTs = false;
     return true;
