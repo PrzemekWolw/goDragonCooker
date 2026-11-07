@@ -4,6 +4,7 @@
 
 #include "core/i18n.h"
 #include "core/platform.h"
+#include "core/settings.h"
 #include "core/strings.h"
 #include "imgui_stdlib.h"
 #include "ui/theme.h"
@@ -111,6 +112,7 @@ void renderDirPicker()
         if (ImGui::Button(trId("gdc.common.select", "picker_select").c_str())) {
             *dirPicker.target = dirPicker.pathStr;
             dirPicker.open = false;
+            saveSettings();
         }
         ImGui::SameLine();
         if (ImGui::Button(trId("gdc.common.cancel", "picker_cancel").c_str())) {

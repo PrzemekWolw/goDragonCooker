@@ -11,6 +11,7 @@
 
 #include "core/i18n.h"
 #include "core/platform.h"
+#include "core/settings.h"
 #include "core/strings.h"
 #include "core/task.h"
 #include "imgui.h"
@@ -90,6 +91,42 @@ static const char* detailStageKeys[] = {
 void matGenTabInit()
 {
     matGenTab.settings.suffixes = defaultTextureEntries;
+    registerSettings(
+        [](const SettingsJson& j) {
+            if (!j.contains("materialGenerator") || !j["materialGenerator"].is_object()) {
+                return;
+            }
+            const SettingsJson& m = j["materialGenerator"];
+            MatGenSettings& s = matGenTab.settings;
+            matGenTab.directory = m.value("directory", "");
+            s.instanceOpacity = m.value("instanceOpacity", s.instanceOpacity);
+            s.instanceEmissive = m.value("instanceEmissive", s.instanceEmissive);
+            s.enableDetailMaps = m.value("enableDetailMaps", s.enableDetailMaps);
+            s.detailScaleX = m.value("detailScaleX", s.detailScaleX);
+            s.detailScaleY = m.value("detailScaleY", s.detailScaleY);
+            s.customSuffixes.clear();
+            if (m.contains("customSuffixes") && m["customSuffixes"].is_array()) {
+                for (const auto& e : m["customSuffixes"]) {
+                    if (e.is_object() && e.value("suffix", "") != "" && e.value("stage", "") != "") {
+                        s.customSuffixes.push_back({e.value("suffix", ""), e.value("ext", ".color.png"), e.value("stage", "")});
+                    }
+                }
+            }
+        },
+        [](SettingsJson& j) {
+            const MatGenSettings& s = matGenTab.settings;
+            SettingsJson custom = SettingsJson::array();
+            for (const TexEntry& entry : s.customSuffixes) {
+                custom.push_back({{"suffix", entry.suffix}, {"ext", entry.ext}, {"stage", entry.stageKey}});
+            }
+            j["materialGenerator"] = {{"directory", matGenTab.directory},
+                                      {"instanceOpacity", s.instanceOpacity},
+                                      {"instanceEmissive", s.instanceEmissive},
+                                      {"enableDetailMaps", s.enableDetailMaps},
+                                      {"detailScaleX", s.detailScaleX},
+                                      {"detailScaleY", s.detailScaleY},
+                                      {"customSuffixes", custom}};
+        });
 }
 
 // ".data.png" -> ".dataR.png". Empty when the name is not a .data texture.
@@ -458,11 +495,12 @@ static void patternEditRow(const std::string& id, PatternEditBuf& buf)
     ImGui::SameLine();
 }
 
-static void renderPatternRow(const PatternInfo& info)
+static bool renderPatternRow(const PatternInfo& info)
 {
     MatGenTab& m = matGenTab;
     const std::string stage = info.stage;
     auto& custom = m.settings.customSuffixes;
+    bool changed = false;
 
     ImGui::Separator();
     ImGui::PushStyleColor(ImGuiCol_Text, colTextDim);
@@ -487,6 +525,7 @@ static void renderPatternRow(const PatternInfo& info)
             if (!suffix.empty()) {
                 custom[index] = {suffix, allExtOpts[buf.extIdx], stage};
                 buf.dirty = false;
+                changed = true;
             }
         }
         ImGui::SameLine();
@@ -495,6 +534,7 @@ static void renderPatternRow(const PatternInfo& info)
             for (auto it = m.patternBufs.begin(); it != m.patternBufs.end();) {
                 it = hasPrefix(it->first, stage + "#") ? m.patternBufs.erase(it) : std::next(it);
             }
+            changed = true;
             break;
         }
     }
@@ -511,9 +551,11 @@ static void renderPatternRow(const PatternInfo& info)
         if (!suffix.empty()) {
             custom.push_back({suffix, allExtOpts[draft.extIdx], stage});
             draft.dirty = false;
+            changed = true;
         }
     }
     tooltip(info.description);
+    return changed;
 }
 
 void matGenTabUI()
@@ -525,7 +567,7 @@ void matGenTabUI()
     MatGenSettings& s = m.settings;
 
     ImGui::TextUnformatted(tr("gdc.common.texturesDirectory"));
-    ImGui::InputText("##matgen_directory", &m.directory);
+    bool dirty = ImGui::InputText("##matgen_directory", &m.directory);
     ImGui::SameLine();
     if (ImGui::Button(trId("gdc.common.browse", "matgen_browse").c_str())) {
         openDirPicker(&m.directory);
@@ -534,16 +576,16 @@ void matGenTabUI()
     ImGui::Separator();
 
     if (ImGui::TreeNodeEx(trId("gdc.matgen.basicSettings", "matgen_basic").c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Checkbox(trId("gdc.matgen.instanceOpacity", "matgen_inst_opacity").c_str(), &s.instanceOpacity);
+        dirty |= ImGui::Checkbox(trId("gdc.matgen.instanceOpacity", "matgen_inst_opacity").c_str(), &s.instanceOpacity);
         tooltip("gdc.matgen.instanceOpacity.tooltip");
-        ImGui::Checkbox(trId("gdc.matgen.instanceEmissive", "matgen_inst_emissive").c_str(), &s.instanceEmissive);
+        dirty |= ImGui::Checkbox(trId("gdc.matgen.instanceEmissive", "matgen_inst_emissive").c_str(), &s.instanceEmissive);
         tooltip("gdc.matgen.instanceEmissive.tooltip");
         ImGui::TreePop();
     }
 
     if (ImGui::TreeNode(trId("gdc.matgen.detailMaps", "matgen_detail").c_str())) {
-        ImGui::Checkbox(trId("gdc.matgen.enableDetailMapsWireUp", "matgen_detail_on").c_str(),
-                        &s.enableDetailMaps);
+        dirty |= ImGui::Checkbox(trId("gdc.matgen.enableDetailMapsWireUp", "matgen_detail_on").c_str(),
+                                 &s.enableDetailMaps);
         tooltip("gdc.matgen.enableDetailMapsWireUp.tooltip");
         if (s.enableDetailMaps) {
             float x = float(s.detailScaleX);
@@ -553,6 +595,7 @@ void matGenTabUI()
             ImGui::SetNextItemWidth(px(120));
             if (ImGui::InputFloat("##detail_scale_x", &x, 0.01f, 0.0f, "%.2f")) {
                 s.detailScaleX = x;
+                dirty = true;
             }
             tooltip("gdc.matgen.uvTilingXForDetail");
             ImGui::SameLine();
@@ -561,6 +604,7 @@ void matGenTabUI()
             ImGui::SetNextItemWidth(px(120));
             if (ImGui::InputFloat("##detail_scale_y", &y, 0.01f, 0.0f, "%.2f")) {
                 s.detailScaleY = y;
+                dirty = true;
             }
             tooltip("gdc.matgen.uvTilingYForDetail");
         }
@@ -574,11 +618,14 @@ void matGenTabUI()
         ImGui::PopStyleColor();
         if (ImGui::BeginChild("##patterns", ImVec2(0, 390), ImGuiChildFlags_Borders)) {
             for (const PatternInfo& info : patterns) {
-                renderPatternRow(info);
+                dirty |= renderPatternRow(info);
             }
         }
         ImGui::EndChild();
         ImGui::TreePop();
+    }
+    if (dirty) {
+        saveSettings();
     }
 
     ImGui::Separator();

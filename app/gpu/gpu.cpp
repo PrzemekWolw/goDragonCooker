@@ -29,8 +29,8 @@ void registerGpuSettings()
             if (backend == textureBackendTexconv || backend == textureBackendCompressonator) {
                 app.textureBackend = backend;
             }
-            app.gpuAdapter = settings.value("texconvGPU", 0);
-            app.vulkanDevice = settings.value("vulkanGPU", 0);
+            app.gpuAdapter = settings.value("texconvGPU", app.gpuAdapter);
+            app.vulkanDevice = settings.value("vulkanGPU", app.vulkanDevice);
         },
         [](SettingsJson& settings) {
             std::lock_guard lock(app.mu);
@@ -47,8 +47,10 @@ void registerGpuSettings()
 #if defined(_WIN32)
 
 struct GpuAdapter {
-    int index;
+    int index = 0;
     std::string name;
+    uint64_t dedicatedMemory = 0;
+    uint64_t sharedMemory = 0;
 };
 
 static std::vector<GpuAdapter> enumerateDXGIAdapters()
@@ -64,10 +66,11 @@ static std::vector<GpuAdapter> enumerateDXGIAdapters()
             break;
         }
         DXGI_ADAPTER_DESC1 description = {};
-        if (SUCCEEDED(adapter->GetDesc1(&description))) {
+        if (SUCCEEDED(adapter->GetDesc1(&description)) && (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
             std::string name = u8str(fs::path(description.Description));
             if (!name.empty()) {
-                adapters.push_back({int(index), name});
+                adapters.push_back({int(index), name, uint64_t(description.DedicatedVideoMemory),
+                                    uint64_t(description.SharedSystemMemory)});
             }
         }
         adapter->Release();
@@ -83,10 +86,6 @@ static const std::vector<GpuAdapter>& availableGPUAdapters()
         std::vector<GpuAdapter> result;
         std::set<std::string> seen;
         for (const GpuAdapter& adapter : enumerateDXGIAdapters()) {
-            const std::string lower = toLower(adapter.name);
-            if (lower == "microsoft basic display adapter" || lower == "microsoft basic render driver") {
-                continue;
-            }
             if (seen.insert(adapter.name).second) {
                 result.push_back(adapter);
             }
@@ -154,33 +153,31 @@ int gpuAdapterIndexForOption(int option)
     return adapters[option - 1].index;
 }
 
-static int gpuScore(const std::string& name)
+static bool isDiscreteAdapter(const GpuAdapter& a)
 {
-    const std::string lower = toLower(name);
-    int score = 1;
-    if (lower.find("nvidia") != std::string::npos) {
-        score = 100;
-    } else if (lower.find("amd") != std::string::npos || lower.find("radeon") != std::string::npos) {
-        score = 70;
-    } else if (lower.find("intel") != std::string::npos) {
-        score = 10;
+    return a.dedicatedMemory >= (1ull << 30);
+}
+
+static bool betterAdapter(const GpuAdapter& a, const GpuAdapter& b)
+{
+    const bool da = isDiscreteAdapter(a), db = isDiscreteAdapter(b);
+    if (da != db) {
+        return da;
     }
-    if (lower.find("780m") != std::string::npos || lower.find("680m") != std::string::npos ||
-        lower.find("integrated") != std::string::npos) {
-        score -= 40;
+    if (a.dedicatedMemory != b.dedicatedMemory) {
+        return a.dedicatedMemory > b.dedicatedMemory;
     }
-    return score;
+    return a.sharedMemory > b.sharedMemory;
 }
 
 std::vector<int> gpuAdapterCandidates()
 {
+    std::vector<GpuAdapter> sorted = availableGPUAdapters();
+    std::stable_sort(sorted.begin(), sorted.end(), betterAdapter);
     std::vector<int> indices;
-    for (const GpuAdapter& adapter : availableGPUAdapters()) {
+    for (const GpuAdapter& adapter : sorted) {
         indices.push_back(adapter.index);
     }
-    std::stable_sort(indices.begin(), indices.end(), [](int a, int b) {
-        return gpuScore(gpuAdapterName(a)) > gpuScore(gpuAdapterName(b));
-    });
     return indices;
 }
 

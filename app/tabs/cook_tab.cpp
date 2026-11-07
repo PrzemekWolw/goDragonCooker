@@ -105,7 +105,7 @@ void runCooker(std::string directory, bool autoDetectFmt, CookValidation validat
             tab.log(format("  SKIP: %s (%s)", name.c_str(), error.c_str()));
             continue;
         }
-        if (img.bits != 0 && img.bits != 8 && !isFloatHDR(name)) {
+        if (img.bits > 8 && !isFloatHDR(name)) {
             tab.log(format(tr("gdc.cook.skipNot8BitGot"), name.c_str(), img.bits));
             continue;
         }
@@ -136,6 +136,13 @@ void runCooker(std::string directory, bool autoDetectFmt, CookValidation validat
     std::vector<CookJob> codecJobs, cpuJobs;
     for (const CookJob& job : jobs) {
         (isExpensiveCodec(job.format) ? codecJobs : cpuJobs).push_back(job);
+    }
+
+    if (backend == textureBackendCompressonator) {
+        if (const std::string error = ensureVulkanContext(vulkanDevice); !error.empty()) {
+            tab.log(format(tr("gdc.cook.vulkanUnavailableUsingTexconv"), trim(error).c_str()));
+            backend = textureBackendTexconv;
+        }
     }
 
     tab.setStatus(tr("gdc.cook.cookingTextures"));
@@ -382,6 +389,8 @@ void cookTabInit()
             }
             const SettingsJson& s = j["cook"];
             CookValidation& v = cookTab.validation;
+            cookTab.directory = s.value("directory", "");
+            cookTab.autoDetectFmt = s.value("assumeGrayscale", false);
             v.validate = s.value("validate", v.validate);
             v.retry = s.value("retry", v.retry);
             v.thresholds.bc7 = s.value("targetBC7", v.thresholds.bc7);
@@ -390,7 +399,9 @@ void cookTabInit()
         },
         [](SettingsJson& j) {
             const CookValidation& v = cookTab.validation;
-            j["cook"] = {{"validate", v.validate},
+            j["cook"] = {{"directory", cookTab.directory},
+                         {"assumeGrayscale", cookTab.autoDetectFmt},
+                         {"validate", v.validate},
                          {"retry", v.retry},
                          {"targetBC7", v.thresholds.bc7},
                          {"targetBC5", v.thresholds.bc5},
@@ -435,15 +446,18 @@ void cookTabUI()
     }
     CookTab& c = cookTab;
     ImGui::TextUnformatted(tr("gdc.common.texturesDirectory"));
-    ImGui::InputText("##cook_directory", &c.directory);
+    bool dirty = ImGui::InputText("##cook_directory", &c.directory);
     ImGui::SameLine();
     if (ImGui::Button(trId("gdc.common.browse", "cook_browse").c_str())) {
         openDirPicker(&c.directory);
     }
 
     ImGui::Separator();
-    ImGui::Checkbox(trId("gdc.cook.assumeDataTexturesAreGrayscale", "cook_auto_fmt").c_str(), &c.autoDetectFmt);
+    dirty |= ImGui::Checkbox(trId("gdc.cook.assumeDataTexturesAreGrayscale", "cook_auto_fmt").c_str(), &c.autoDetectFmt);
     tooltip("gdc.cook.assumeDataTexturesAreGrayscale.tooltip");
+    if (dirty) {
+        saveSettings();
+    }
     validationControlsUI(c.validation);
     ImGui::Separator();
 

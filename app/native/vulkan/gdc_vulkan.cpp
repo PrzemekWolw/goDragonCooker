@@ -297,29 +297,77 @@ std::vector<VkPhysicalDevice> enumerateDevices(VkInstance instance, std::string&
     return devices;
 }
 
-int deviceScore(VkPhysicalDevice device)
+int typeRank(VkPhysicalDeviceType type)
 {
-    VkPhysicalDeviceProperties properties{};
-    vkGetPhysicalDeviceProperties(device, &properties);
-    int score = properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 1000 : 100;
-    score += static_cast<int>(properties.limits.maxComputeSharedMemorySize / 1024);
-    return score;
+    switch (type) {
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+        return 4;
+    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+        return 3;
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+        return 2;
+    case VK_PHYSICAL_DEVICE_TYPE_OTHER:
+        return 1;
+    case VK_PHYSICAL_DEVICE_TYPE_CPU:
+    default:
+        return 0;
+    }
+}
+
+uint64_t deviceLocalMemory(VkPhysicalDevice device)
+{
+    VkPhysicalDeviceMemoryProperties memory{};
+    vkGetPhysicalDeviceMemoryProperties(device, &memory);
+    uint64_t bestHeap = 0;
+    for (uint32_t i = 0; i < memory.memoryHeapCount; ++i) {
+        if ((memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0)
+            continue;
+        bool hostVisible = false;
+        for (uint32_t t = 0; t < memory.memoryTypeCount; ++t) {
+            if (memory.memoryTypes[t].heapIndex == i
+                && (memory.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+                hostVisible = true;
+                break;
+            }
+        }
+        if (!hostVisible)
+            bestHeap = std::max<uint64_t>(bestHeap, memory.memoryHeaps[i].size);
+    }
+    if (bestHeap > 0)
+        return bestHeap;
+    for (uint32_t i = 0; i < memory.memoryHeapCount; ++i) {
+        if (memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            bestHeap = std::max<uint64_t>(bestHeap, memory.memoryHeaps[i].size);
+    }
+    return bestHeap;
+}
+
+bool betterDevice(VkPhysicalDevice a, VkPhysicalDevice b)
+{
+    VkPhysicalDeviceProperties pa{}, pb{};
+    vkGetPhysicalDeviceProperties(a, &pa);
+    vkGetPhysicalDeviceProperties(b, &pb);
+    const int ta = typeRank(pa.deviceType), tb = typeRank(pb.deviceType);
+    if (ta != tb)
+        return ta > tb;
+    const uint64_t ma = deviceLocalMemory(a) >> 20, mb = deviceLocalMemory(b) >> 20;
+    if (ma != mb)
+        return ma > mb;
+    return pa.limits.maxComputeSharedMemorySize > pb.limits.maxComputeSharedMemorySize;
 }
 
 int selectDevice(const std::vector<VkPhysicalDevice>& devices, int requested)
 {
     if (requested >= 0)
         return requested < static_cast<int>(devices.size()) ? requested : -1;
-    int best = -1;
-    int bestScore = -1;
-    for (size_t i = 0; i < devices.size(); ++i) {
-        int score = deviceScore(devices[i]);
-        if (score > bestScore) {
-            best = static_cast<int>(i);
-            bestScore = score;
-        }
+    if (devices.empty())
+        return -1;
+    size_t best = 0;
+    for (size_t i = 1; i < devices.size(); ++i) {
+        if (betterDevice(devices[i], devices[best]))
+            best = i;
     }
-    return best;
+    return static_cast<int>(best);
 }
 
 bool createBuffer(
