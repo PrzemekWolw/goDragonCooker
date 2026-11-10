@@ -12,6 +12,7 @@ Usage:
     python build_release.py --arm64      # ARM64 targets only
     python build_release.py --clean      # remove artifacts before building
     python build_release.py --no-upx     # skip UPX compression
+    python build_release.py --tests      # run i18n, model, and texconv cook self-tests
     python build_release.py --skip-texconv  # use existing Texconv libraries
     python build_release.py --skip-vulkan   # use existing Vulkan libraries/shaders
 
@@ -987,8 +988,8 @@ def clean():
         log("  removed dist/")
 
 
-def built_app_binary(build_dir: Path, target: dict) -> Path:
-    name = "goDragonCooker.exe" if target["goos"] == "windows" else "goDragonCooker"
+def built_named_binary(build_dir: Path, target: dict, stem: str) -> Path:
+    name = stem + (".exe" if target["goos"] == "windows" else "")
     for candidate in (build_dir / "Release" / name, build_dir / name):
         if candidate.is_file():
             return candidate
@@ -1000,6 +1001,10 @@ def built_app_binary(build_dir: Path, target: dict) -> Path:
         log(f"C++ build did not produce {name}", error=True)
         sys.exit(1)
     return max(matches, key=lambda path: path.stat().st_mtime)
+
+
+def built_app_binary(build_dir: Path, target: dict) -> Path:
+    return built_named_binary(build_dir, target, "goDragonCooker")
 
 
 def reset_stale_cmake_generator(build_dir: Path, command: list[str]):
@@ -1075,6 +1080,7 @@ def app_cmake_command(target: dict) -> tuple[list[str], dict[str, str], Path]:
 
     command.append("-DCMAKE_BUILD_TYPE=Release")
     command.append(f"-DGDC_X86_64_V3={'ON' if X86_64_V3 else 'OFF'}")
+    command.append("-DGDC_BUILD_TESTS=ON")
     return command, env, build_dir
 
 
@@ -1144,7 +1150,86 @@ def build_target(target: dict, upx: bool, upx_threads: bool, sources: list[Path]
 # Package
 # ---------------------------------------------------------------------------
 
-def package_target(target: dict):
+def host_can_run(target: dict) -> bool:
+    host = {"Linux": "linux", "Darwin": "macos", "Windows": "windows"}.get(platform.system(), "")
+    return host == target["platform"] and host_goarch() == target["goarch"]
+
+
+def build_self_test_binaries(target: dict) -> dict[str, Path]:
+    command, env, build_dir = app_cmake_command(target)
+    drop_env = MSVC_CONFIG_ENV_DROP if any(
+        part.startswith("Visual Studio") for part in command
+    ) else ()
+    reset_stale_cmake_generator(build_dir, command)
+    run(command, env=env, drop_env=drop_env)
+    run(
+        [
+            "cmake", "--build", str(build_dir), "--config", "Release",
+            "--parallel", str(CPU_THREADS),
+            "--target", "gdc_i18n_test",
+            "--target", "gdc_model_test",
+            "--target", "gdc_cook_test",
+        ],
+        env=env,
+        drop_env=drop_env,
+    )
+    return {
+        name: built_named_binary(build_dir, target, name)
+        for name in ("gdc_i18n_test", "gdc_model_test", "gdc_cook_test")
+    }
+
+
+def run_report(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+    result = run(cmd, **kwargs)
+    for line in ((result.stdout or "") + (result.stderr or "")).splitlines():
+        if line.strip():
+            log(f"  {line}", info=False)
+    return result
+
+
+def run_self_tests(target: dict, stage: Path):
+    """Run the harnesses against the staged package. Cook uses the texconv just copied there."""
+    if not host_can_run(target):
+        log(f"Self-test skipped for {target['name']}: this host cannot run that build")
+        return
+    data = APP_SOURCE / "tests" / "data"
+    image = data / "color.png"
+    model = data / "triangle.obj"
+    if not image.is_file() or not model.is_file():
+        log(f"Self-test fixtures missing in {data}", error=True)
+        sys.exit(1)
+
+    binaries = build_self_test_binaries(target)
+    log(f"Self-test {target['name']}")
+    run_report([str(binaries["gdc_i18n_test"])])
+
+    converted = PROJECT / ".build" / f"selftest-model-{target['name']}"
+    if converted.exists():
+        shutil.rmtree(converted)
+    run_report([
+        str(binaries["gdc_model_test"]),
+        "--convert", "glb,glb-draco,dae,cdae,dts",
+        "--out", str(converted),
+        "--back",
+        str(model),
+    ])
+
+    cook = str(binaries["gdc_cook_test"])
+    cooked = PROJECT / ".build" / f"selftest-cook-{target['name']}"
+    if cooked.exists():
+        shutil.rmtree(cooked)
+    run_report([
+        cook, "--work", str(cooked),
+        f"color:{image}", f"normal:{image}", f"dataR:{image}",
+    ], cwd=stage)
+    corrupted = PROJECT / ".build" / f"selftest-cook-corrupt-{target['name']}"
+    if corrupted.exists():
+        shutil.rmtree(corrupted)
+    run_report([cook, "--work", str(corrupted), "--corrupt", f"color:{image}"], cwd=stage)
+    log(f"Self-test {target['name']} passed")
+
+
+def package_target(target: dict, run_tests: bool = False):
     name = target["name"]
     binary_src = BINARY_BUILD_OUTPUTS.get(name, binary_path(target))
     lib_name = target["texconv_lib"]
@@ -1193,6 +1278,9 @@ def package_target(target: dict):
                     str(stage_bin / runtime_library.name),
                 )
 
+    if run_tests:
+        run_self_tests(target, stage)
+
     zip_path = DIST_DIR / target["zip_name"]
     with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(str(stage)):
@@ -1220,6 +1308,11 @@ def main():
     p.add_argument("--arm64", action="store_true", help="Build ARM64 targets only")
     p.add_argument("--clean", action="store_true", help="Remove artifacts before building")
     p.add_argument("--no-upx", action="store_true", help="Skip UPX compression")
+    p.add_argument(
+        "--tests",
+        action="store_true",
+        help="Run the i18n, model, and texconv cook self-tests against the staged package",
+    )
     p.add_argument("--skip-texconv", action="store_true", help="Use existing Texconv libraries")
     p.add_argument("--skip-vulkan", action="store_true", help="Use existing Compressonator Vulkan libraries")
     p.add_argument(
@@ -1277,7 +1370,7 @@ def main():
             future.result()
 
     for target in selected:
-        package_target(target)
+        package_target(target, args.tests)
 
     zips = list(DIST_DIR.glob("*.zip"))
     if zips:

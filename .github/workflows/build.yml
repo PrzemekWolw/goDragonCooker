@@ -131,10 +131,10 @@ jobs:
                   name: vulkan-shaders
                   path: precompiled-shaders
 
-            - name: Build release package
+            - name: Build release package and self-test
               env:
                   GDC_PRECOMPILED_SHADER_DIR: ${{ matrix.precompiled_shaders && format('{0}/precompiled-shaders', github.workspace) || '' }}
-              run: python build_release.py --clean --${{ matrix.platform }} --${{ matrix.arch }}
+              run: python build_release.py --clean --${{ matrix.platform }} --${{ matrix.arch }} --tests
 
             - name: Prepare artifact
               run: python -c "import zipfile; zipfile.ZipFile(r'dist/goDragonCooker-${{ matrix.platform }}-${{ matrix.arch }}.zip').extractall('artifact')"

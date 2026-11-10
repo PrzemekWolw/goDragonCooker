@@ -245,23 +245,37 @@ target_include_directories(gdc_model PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/assimp/contrib/draco/src"
     "${CMAKE_BINARY_DIR}")
 
-# Local test harnesses (app/tests is git-ignored); skipped when the folder is absent.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app/tests/model_test.cpp")
+option(GDC_BUILD_TESTS "Build gdc_i18n_test, gdc_model_test and gdc_cook_test" ON)
+if(GDC_BUILD_TESTS)
+    enable_testing()
+
     add_executable(gdc_model_test app/tests/model_test.cpp)
     gdc_target_options(gdc_model_test)
     target_link_libraries(gdc_model_test PRIVATE gdc_model)
-endif()
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app/tests/i18n_test.cpp")
     add_executable(gdc_i18n_test app/tests/i18n_test.cpp)
     gdc_target_options(gdc_i18n_test)
     target_link_libraries(gdc_i18n_test PRIVATE gdc_model)
-endif()
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app/tests/cook_test.cpp")
     add_executable(gdc_cook_test app/tests/cook_test.cpp)
     gdc_target_options(gdc_cook_test)
     target_link_libraries(gdc_cook_test PRIVATE gdc_texture)
+
+    set(GDC_TEST_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/app/tests/data/triangle.obj")
+    set(GDC_TEST_IMAGE "${CMAKE_CURRENT_SOURCE_DIR}/app/tests/data/color.png")
+    add_test(NAME gdc_i18n_test COMMAND gdc_i18n_test)
+    add_test(NAME gdc_model_test COMMAND gdc_model_test
+        --convert glb,glb-draco,dae,cdae,dts
+        --out "${CMAKE_CURRENT_BINARY_DIR}/selftest-model"
+        --back "${GDC_TEST_MODEL}")
+    add_test(NAME gdc_cook_test COMMAND gdc_cook_test
+        --work "${CMAKE_CURRENT_BINARY_DIR}/selftest-cook"
+        "color:${GDC_TEST_IMAGE}" "normal:${GDC_TEST_IMAGE}" "dataR:${GDC_TEST_IMAGE}")
+    add_test(NAME gdc_cook_corrupt COMMAND gdc_cook_test
+        --work "${CMAKE_CURRENT_BINARY_DIR}/selftest-cook-corrupt"
+        --corrupt "color:${GDC_TEST_IMAGE}")
+    set_tests_properties(gdc_cook_test gdc_cook_corrupt PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()
 
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/app/dragonpbr.ico" ICON_HEX HEX)

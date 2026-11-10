@@ -121,8 +121,10 @@ python build_release.py --no-upx
 python build_release.py --skip-texconv
 python build_release.py --skip-vulkan
 python build_release.py --no-x86-64-v3
+python build_release.py --tests
 ```
 
+- `--tests` runs the i18n, model, and texconv cook self-tests against the staged package before zipping.
 - `--no-upx` disables UPX compression.
 - `--no-x86-64-v3` builds the x64 app and Texconv for any x86-64 CPU instead of
   x86-64-v3 (AVX2, FMA, BMI2). With plain CMake, pass `-DGDC_X86_64_V3=OFF`.
@@ -160,7 +162,7 @@ Every target is a row in the single `build` matrix job (each row pins its own
 target cross-compiles from an x64 Windows host that has those tools installed.
 `build_release.py` selects the Visual Studio 18 2026 CMake generator when that
 Visual Studio is the newest one installed, and Visual Studio 17 2022 otherwise.
-All five rows feed the `release` job.
+All five rows feed the `release` job. Each row passes `--tests`: `gdc_i18n_test`, a convert-and-back of `app/tests/data/triangle.obj` to glb, Draco glb, dae, cdae and dts, and a texconv CPU cook of `app/tests/data/color.png` (color, normal, dataR, plus a corrupted DDS that must fail validation). The cook check loads the texconv library just copied into that package. A cross-compiled target is skipped because the host cannot run it.
 
 ## Building on Windows
 
