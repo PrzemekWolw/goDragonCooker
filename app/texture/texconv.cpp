@@ -10,11 +10,13 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <objbase.h>
 
 extern "C" {
 __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
 __declspec(dllexport) DWORD AmdPowerXpressRequestHighPerformance = 0x00000001;
 }
+#pragma comment(lib, "ole32.lib")
 #endif
 
 using TexconvFn = int (*)(int argc, wchar_t* argv[], bool verbose, bool initCOM, bool allowSlowCodec,
@@ -26,6 +28,18 @@ static std::mutex texconvInitMu;
 static std::mutex texconvCodecMu;
 static TexconvFn texconvFn = nullptr;
 static TexconvVersionFn texconvVersionFn = nullptr;
+
+#if defined(_WIN32)
+// DirectXTex keeps the WIC factory for the process. CoUninitialize frees it and the next cook crashes.
+static void ensureThreadCOM()
+{
+    static thread_local bool ready = false;
+    if (!ready) {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        ready = true;
+    }
+}
+#endif
 
 static std::wstring toWide(const std::string& s)
 {
@@ -126,10 +140,9 @@ std::string texconvRun(const std::vector<std::string>& args, bool forceCPU)
 
     const bool gpuCodec = containsGPUCodecFormat(args);
 #if defined(_WIN32)
-    const bool initCOM = true;
+    ensureThreadCOM();
     const bool allowSlowCodec = !(gpuCodec && !forceCPU);
 #else
-    const bool initCOM = false;
     const bool allowSlowCodec = true;
 #endif
 
@@ -151,7 +164,7 @@ std::string texconvRun(const std::vector<std::string>& args, bool forceCPU)
     }
 
     wchar_t errBuf[256] = {};
-    const int ret = texconvFn(int(argv.size()), argv.data(), false, initCOM, allowSlowCodec, errBuf, 256);
+    const int ret = texconvFn(int(argv.size()), argv.data(), false, false, allowSlowCodec, errBuf, 256);
     if (ret == 0) {
         return "";
     }
