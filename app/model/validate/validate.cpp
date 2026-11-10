@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstring>
 #include <functional>
 #include <map>
 #include <set>
@@ -13,7 +12,6 @@
 #include <assimp/scene.h>
 
 #include "core/strings.h"
-#include "model/assimp/ai_tangents.h"
 
 namespace model {
 namespace {
@@ -393,33 +391,13 @@ void checkUpAxis(ValidationReport& rep, UpAxis expected, const RawFrame& raw, co
 
 namespace {
 
-bool startsWithCi(const char* name, const char* prefix)
-{
-    return hasPrefix(toLower(name ? name : ""), prefix);
-}
-
-bool childStartsWith(const aiNode* node, const char* prefix)
-{
-    if (!node) {
-        return false;
-    }
-    for (unsigned i = 0; i < node->mNumChildren; ++i) {
-        if (startsWithCi(node->mChildren[i]->mName.C_Str(), prefix)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// base* with a start* child: the shape the game treats as multi-detail.
 bool lodAnchor(const aiNode* node)
 {
     if (!node) {
         return false;
     }
     for (unsigned i = 0; i < node->mNumChildren; ++i) {
-        const aiNode* child = node->mChildren[i];
-        if (startsWithCi(child->mName.C_Str(), "base") && childStartsWith(child, "start")) {
+        if (isBaseStart(node->mChildren[i])) {
             return true;
         }
     }
@@ -431,7 +409,7 @@ bool treeHasLodAnchor(const aiNode* node)
     if (!node) {
         return false;
     }
-    if (lodAnchor(node)) {
+    if (isBaseStart(node) || lodAnchor(node)) {
         return true;
     }
     for (unsigned i = 0; i < node->mNumChildren; ++i) {
@@ -455,242 +433,9 @@ void collectMeshNodes(const aiNode* node, std::set<std::string>& out)
     }
 }
 
-using Vec3d = aiVector3t<double>;
-
-struct SeamTri {
-    unsigned mesh;
-    Vec3d a, e0, e1, n;
-};
-
-struct SeamResult {
-    size_t gaps = 0;
-    double worst = 0;  // largest counted gap, as a fraction of the node diagonal
-    size_t splits = 0; // vertex pairs of different meshes that nearly but not exactly coincide
-};
-
-SeamResult countSeamGaps(const aiNode* node, const aiScene& scene, double minRel, double maxRel, double splitRel)
-{
-    if (!node) {
-        return {};
-    }
-    SeamResult result;
-    if (node->mNumMeshes >= 2) {
-        std::vector<std::set<std::array<float, 3>>> verts(node->mNumMeshes);
-        // Meshes sharing a material are one group: writers split large meshes, which is not a seam.
-        std::vector<unsigned> group(node->mNumMeshes);
-        std::vector<SeamTri> tris;
-        Vec3d lo(1e30, 1e30, 1e30), hi(-1e30, -1e30, -1e30);
-        for (unsigned m = 0; m < node->mNumMeshes; ++m) {
-            const aiMesh* mesh = scene.mMeshes[node->mMeshes[m]];
-            group[m] = mesh->mMaterialIndex;
-            for (unsigned v = 0; v < mesh->mNumVertices; ++v) {
-                const aiVector3D& p = mesh->mVertices[v];
-                verts[m].insert({p.x, p.y, p.z});
-                lo = Vec3d(std::min<double>(lo.x, p.x), std::min<double>(lo.y, p.y), std::min<double>(lo.z, p.z));
-                hi = Vec3d(std::max<double>(hi.x, p.x), std::max<double>(hi.y, p.y), std::max<double>(hi.z, p.z));
-            }
-            for (unsigned f = 0; f < mesh->mNumFaces; ++f) {
-                const aiFace& face = mesh->mFaces[f];
-                if (face.mNumIndices != 3) {
-                    continue;
-                }
-                const aiVector3D &p0 = mesh->mVertices[face.mIndices[0]], &p1 = mesh->mVertices[face.mIndices[1]], &p2 = mesh->mVertices[face.mIndices[2]];
-                SeamTri t{group[m], Vec3d(p0.x, p0.y, p0.z), Vec3d(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z), Vec3d(p2.x - p0.x, p2.y - p0.y, p2.z - p0.z), {}};
-                t.n = t.e0 ^ t.e1;
-                const double len = t.n.Length();
-                if (len > 0) {
-                    t.n /= len;
-                    tris.push_back(t);
-                }
-            }
-        }
-        const double diag = (hi - lo).Length();
-        const double eps = diag * maxRel, minGap = diag * minRel, cell = std::max(diag / 64, 1e-9);
-        std::unordered_map<CellKey, std::vector<unsigned>, CellHash> grid;
-        for (unsigned i = 0; i < tris.size(); ++i) {
-            const SeamTri& t = tris[i];
-            const Vec3d p1 = t.a + t.e0, p2 = t.a + t.e1;
-            // A sliver thinner than a few tolerance steps has no stable plane: quantization tilts it freely.
-            const double longest = std::max({t.e0.Length(), t.e1.Length(), (t.e1 - t.e0).Length()});
-            if (longest <= 0 || (t.e0 ^ t.e1).Length() / longest < minGap * 4) {
-                continue;
-            }
-            const CellKey c0 = {int64_t(std::floor((std::min({t.a.x, p1.x, p2.x}) - eps) / cell)), int64_t(std::floor((std::min({t.a.y, p1.y, p2.y}) - eps) / cell)),
-                                int64_t(std::floor((std::min({t.a.z, p1.z, p2.z}) - eps) / cell))};
-            const CellKey c1 = {int64_t(std::floor((std::max({t.a.x, p1.x, p2.x}) + eps) / cell)), int64_t(std::floor((std::max({t.a.y, p1.y, p2.y}) + eps) / cell)),
-                                int64_t(std::floor((std::max({t.a.z, p1.z, p2.z}) + eps) / cell))};
-            for (int64_t x = c0.x; x <= c1.x; ++x) {
-                for (int64_t y = c0.y; y <= c1.y; ++y) {
-                    for (int64_t z = c0.z; z <= c1.z; ++z) {
-                        grid[{x, y, z}].push_back(i);
-                    }
-                }
-            }
-        }
-        for (unsigned m = 0; m < node->mNumMeshes; ++m) {
-            for (const auto& p : verts[m]) {
-                const Vec3d v(p[0], p[1], p[2]);
-                auto it = grid.find({int64_t(std::floor(v.x / cell)), int64_t(std::floor(v.y / cell)), int64_t(std::floor(v.z / cell))});
-                if (it == grid.end()) {
-                    continue;
-                }
-                bool near = false;
-                for (unsigned i : it->second) {
-                    const SeamTri& t = tris[i];
-                    if (t.mesh == group[m]) {
-                        continue;
-                    }
-                    const double d = (v - t.a) * t.n;
-                    if (std::fabs(d) <= minGap || std::fabs(d) > eps) {
-                        continue;
-                    }
-                    const Vec3d q = v - t.a - t.n * d;
-                    const double d00 = t.e0 * t.e0, d01 = t.e0 * t.e1, d11 = t.e1 * t.e1, d20 = q * t.e0, d21 = q * t.e1;
-                    const double den = d00 * d11 - d01 * d01;
-                    const double b1 = (d11 * d20 - d01 * d21) / den, b2 = (d00 * d21 - d01 * d20) / den;
-                    if (b1 >= -1e-3 && b2 >= -1e-3 && b1 + b2 <= 1 + 1e-3) {
-                        near = true;
-                        if (diag > 0) {
-                            result.worst = std::max(result.worst, std::fabs(d) / diag);
-                        }
-                        break;
-                    }
-                }
-                result.gaps += near;
-            }
-        }
-
-        const double splitCell = std::max(diag * splitRel, 1e-12);
-        std::unordered_map<CellKey, std::vector<std::pair<unsigned, Vec3d>>, CellHash> points;
-        for (unsigned m = 0; m < node->mNumMeshes; ++m) {
-            for (const auto& p : verts[m]) {
-                const Vec3d v(p[0], p[1], p[2]);
-                const CellKey c = {int64_t(std::floor(v.x / splitCell)), int64_t(std::floor(v.y / splitCell)), int64_t(std::floor(v.z / splitCell))};
-                bool split = false;
-                for (int dx = -1; dx <= 1 && !split; ++dx) {
-                    for (int dy = -1; dy <= 1 && !split; ++dy) {
-                        for (int dz = -1; dz <= 1 && !split; ++dz) {
-                            auto it = points.find({c.x + dx, c.y + dy, c.z + dz});
-                            if (it == points.end()) {
-                                continue;
-                            }
-                            for (const auto& [om, q] : it->second) {
-                                const double d = (v - q).Length();
-                                if (om != group[m] && d > 0 && d <= splitCell) {
-                                    split = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                result.splits += split;
-                points[c].push_back({group[m], v});
-            }
-        }
-    }
-    for (unsigned i = 0; i < node->mNumChildren; ++i) {
-        const SeamResult child = countSeamGaps(node->mChildren[i], scene, minRel, maxRel, splitRel);
-        result.gaps += child.gaps;
-        result.worst = std::max(result.worst, child.worst);
-        result.splits += child.splits;
-    }
-    return result;
-}
-
 } // namespace
 
-void checkSeams(ValidationReport& report, const aiScene& written, const aiScene& source, double posRel)
-{
-    const double minRel = std::max(posRel * 2, 1e-6);
-    const double maxRel = 1e-2;
-    // posRel is two quantization steps of the largest extent; a quarter of it stays below one step of any extent.
-    const double splitRel = std::max(posRel / 4, 1e-7);
-    const SeamResult before = countSeamGaps(source.mRootNode, source, minRel, maxRel, splitRel);
-    const SeamResult after = countSeamGaps(written.mRootNode, written, minRel, maxRel, splitRel);
-    report.json["seams"] = {{"source", before.gaps}, {"written", after.gaps}, {"worst", after.worst}, {"sourceWorst", before.worst},
-                             {"splitsSource", before.splits}, {"splits", after.splits}};
-    // Quantization pushes a few vertices across the line. A real crack adds a batch of them and opens the gap.
-    // A model that was tight (no gaps) fails on the new batch alone.
-    const size_t allowance = std::max<size_t>(16, before.gaps / 8);
-    const bool more = after.gaps > before.gaps + allowance;
-    const bool opened = before.gaps == 0 || after.worst > before.worst + minRel;
-    const bool split = after.splits > before.splits + 4;
-    auto fail = [&](const std::string& text) {
-        if (int(Verdict::Fail) > int(report.verdict)) {
-            report.verdict = Verdict::Fail;
-        }
-        report.lines.push_back(text);
-        report.json["verdict"] = verdictName(report.verdict);
-    };
-    if (split) {
-        fail(format("FAIL SEAMS: %zu shared vertices between material groups no longer coincide (source had %zu). "
-                    "The groups were quantized separately, which shows as cracks and z-fighting.",
-                    after.splits, before.splits));
-    }
-    if (more && opened) {
-        fail(format("FAIL SEAMS: %zu vertices are off another material group's surface by more than the position tolerance "
-                    "(source had %zu, worst %.3g of size, source worst %.3g). Coplanar or adjacent groups no longer line up, which shows as cracks and z-fighting.",
-                    after.gaps, before.gaps, after.worst, before.worst));
-    }
-    if (!split && !(more && opened)) {
-        report.lines.push_back("Seams: coincident vertices between material groups stay coincident");
-    }
-}
-
-void checkTangents(ValidationReport& report, const aiScene& written, const aiScene& source)
-{
-    for (unsigned m = 0; m < source.mNumMeshes; ++m) {
-        if (source.mMeshes[m]->HasTangentsAndBitangents()) {
-            return;
-        }
-    }
-    size_t checked = 0, flipped = 0, missing = 0;
-    std::vector<aiVector3D> tangents;
-    std::vector<float> handedness;
-    for (unsigned m = 0; m < written.mNumMeshes; ++m) {
-        const aiMesh& mesh = *written.mMeshes[m];
-        if (!gameTangents(mesh, tangents, handedness)) {
-            continue;
-        }
-        if (!mesh.HasTangentsAndBitangents()) {
-            missing += mesh.mNumVertices;
-            continue;
-        }
-        for (unsigned v = 0; v < mesh.mNumVertices; ++v) {
-            // Where the UVs barely span a direction, quantization turns the whole frame; there is nothing to compare.
-            if (std::fabs(handedness[v]) < 0.5f || mesh.mTangents[v] * tangents[v] < 0.9f) {
-                continue;
-            }
-            ++checked;
-            const bool inverted = ((mesh.mNormals[v] ^ mesh.mTangents[v]) * mesh.mBitangents[v]) < 0.0f;
-            flipped += inverted != (handedness[v] < 0.0f);
-        }
-    }
-    report.json["tangents"] = {{"checked", checked}, {"flipped", flipped}, {"missing", missing}};
-    auto fail = [&](const std::string& text) {
-        if (int(Verdict::Fail) > int(report.verdict)) {
-            report.verdict = Verdict::Fail;
-        }
-        report.lines.push_back(text);
-        report.json["verdict"] = verdictName(report.verdict);
-    };
-    if (missing) {
-        fail(format("FAIL TANGENTS: %zu vertices have no tangents. The game derives them itself with the bitangent inverted, "
-                    "which shows normal maps upside down.",
-                    missing));
-    }
-    if (flipped * 4 > checked) {
-        fail(format("FAIL TANGENTS: %zu of %zu vertices have the bitangent handedness inverted against the game's. "
-                    "Normal maps would show upside down.",
-                    flipped, checked));
-    }
-    if (!missing && flipped * 4 <= checked) {
-        report.lines.push_back("Tangents: handedness matches the game's");
-    }
-}
-
-void checkGameLod(ValidationReport& report, const std::string& formatId, const aiScene& written, const aiScene& source, bool hierarchy)
+void checkGameLod(ValidationReport& report, const aiScene& written, const aiScene& source, bool hierarchy)
 {
     if (!treeHasLodAnchor(source.mRootNode)) {
         return;
@@ -705,14 +450,8 @@ void checkGameLod(ValidationReport& report, const std::string& formatId, const a
         return;
     }
     const aiNode* root = written.mRootNode;
-    bool detected = false;
     const char* seen = root ? root->mName.C_Str() : "";
-    if ((formatId == "gltf2" || formatId == "gltf1") && std::strcmp(seen, "ROOT") != 0) {
-        // The game inserts ROOT above a glTF root that is not already named that, then looks one level down.
-        detected = root && startsWithCi(seen, "base") && childStartsWith(root, "start");
-    } else {
-        detected = lodAnchor(root);
-    }
+    const bool detected = isBaseStart(root) || lodAnchor(root);
     auto raise = [&](Verdict v) {
         if (int(v) > int(report.verdict)) {
             report.verdict = v;

@@ -293,7 +293,7 @@ bool Model::load(const std::string& path, std::string& error, std::vector<std::s
         // Assimp scenes are Y up unless the format is natively Z up; the game and the TS writers are Z up.
         const UpAxis frame = importedUp(ext);
         if (frame == UpAxis::Y) {
-            loadedScene->mRootNode->mTransformation = yUpToZUp() * loadedScene->mRootNode->mTransformation;
+            rotateScene(*loadedScene, yUpToZUp());
         }
         upNote = format("%s-up (%s) -> Z-up", upAxisName(frame), ext.c_str());
     }

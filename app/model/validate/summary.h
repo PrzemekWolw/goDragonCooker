@@ -6,6 +6,7 @@
 
 #include "model/ts/ts_shape.h"
 
+struct aiNode;
 struct aiScene;
 
 // A format-neutral picture of a model for validation: world-space triangles with per-corner
@@ -75,5 +76,9 @@ struct DetailFilter {
 
 Summary summarize(const ts::Shape& shape, const DetailFilter& filter);
 Summary summarize(const aiScene& scene);
+
+// A base* node with a start* child: the shape the game reads detail levels from. When it is the scene root it
+// is still a node (the importer keeps it), unlike an empty root.
+bool isBaseStart(const aiNode* node);
 
 } // namespace model

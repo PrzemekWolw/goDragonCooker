@@ -119,18 +119,29 @@ struct Converter {
 
     void warn(const std::string& w) { warnings.push_back(w); }
 
+    bool isBaseStart(const aiNode* node) const
+    {
+        if (!node || !startsWithI(node->mName.C_Str(), "base")) {
+            return false;
+        }
+        for (unsigned i = 0; i < node->mNumChildren; ++i) {
+            if (startsWithI(node->mChildren[i]->mName.C_Str(), "start")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // base* may be the scene root. glTF keeps a single scene node as the root, so base00 is not a child of anything.
     bool hasBaseStartLayout() const
     {
         const aiNode* root = scene.mRootNode;
+        if (isBaseStart(root)) {
+            return true;
+        }
         for (unsigned i = 0; i < root->mNumChildren; ++i) {
-            const aiNode* base = root->mChildren[i];
-            if (!startsWithI(base->mName.C_Str(), "base")) {
-                continue;
-            }
-            for (unsigned j = 0; j < base->mNumChildren; ++j) {
-                if (startsWithI(base->mChildren[j]->mName.C_Str(), "start")) {
-                    return true;
-                }
+            if (isBaseStart(root->mChildren[i])) {
+                return true;
             }
         }
         return false;
@@ -187,7 +198,8 @@ struct Converter {
         for (NodeInfo& info : nodes) {
             const aiNode* n = info.ai;
             const bool isRoot = n == scene.mRootNode;
-            if ((isRoot && n->mNumMeshes == 0) || collapseNames.count(n->mName.C_Str())) {
+            // A meshless scene root is an importer container, except when it is the base* node itself.
+            if ((isRoot && n->mNumMeshes == 0 && !isBaseStart(n)) || collapseNames.count(n->mName.C_Str())) {
                 continue;
             }
             int parentTs = -1;

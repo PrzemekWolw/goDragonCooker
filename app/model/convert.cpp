@@ -1,7 +1,6 @@
 #include "model/convert.h"
 
 #include <algorithm>
-#include <cstring>
 #include <map>
 #include <set>
 #include <system_error>
@@ -13,9 +12,9 @@
 
 #include "core/platform.h"
 #include "core/strings.h"
-#include "model/assimp/ai_tangents.h"
 #include "model/axis.h"
 #include "model/draco/draco_gltf.h"
+#include "model/gltf_root.h"
 #include "model/ts/ts_io.h"
 #include "model/validate/summary.h"
 
@@ -79,23 +78,6 @@ aiScene* colladaScene(const aiScene& in)
     return copy;
 }
 
-// Y-up writers (glTF, FBX, OBJ, ...) store the scene rotated out of game space. The rotation goes on the root
-// node, or, for FBX whose exporter ignores the root's transform, on the old root below a fresh one.
-void applyYUpFrame(aiScene& scene, bool wrapRoot)
-{
-    aiNode* root = scene.mRootNode;
-    root->mTransformation = zUpToYUp() * root->mTransformation;
-    if (!wrapRoot) {
-        return;
-    }
-    aiNode* top = new aiNode("gdc_root");
-    top->mChildren = new aiNode*[1]{root};
-    top->mNumChildren = 1;
-    root->mParent = top;
-    scene.mRootNode = top;
-    std::swap(top->mMetaData, root->mMetaData);
-}
-
 // The glTF exporters give materials, meshes and nodes one id namespace and rename clashing nodes
 // ("x" -> "x_node"); the original name goes into the node's extras for Model::load to restore.
 aiScene* gltfScene(const aiScene& in)
@@ -133,24 +115,13 @@ bool startsWithCi(const char* name, const char* prefix)
     return hasPrefix(toLower(name ? name : ""), prefix);
 }
 
-bool childStartsWith(const aiNode* node, const char* prefix)
-{
-    for (unsigned i = 0; i < node->mNumChildren; ++i) {
-        if (startsWithCi(node->mChildren[i]->mName.C_Str(), prefix)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 bool lodAnchor(const aiNode* node)
 {
     if (!node) {
         return false;
     }
     for (unsigned i = 0; i < node->mNumChildren; ++i) {
-        const aiNode* child = node->mChildren[i];
-        if (startsWithCi(child->mName.C_Str(), "base") && childStartsWith(child, "start")) {
+        if (isBaseStart(node->mChildren[i])) {
             return true;
         }
     }
@@ -173,26 +144,6 @@ std::set<std::string> referencedNodeNames(const aiScene& scene)
         }
     }
     return names;
-}
-
-void renameReferences(aiScene& scene, const std::string& from, const char* to)
-{
-    auto fix = [&](aiString& s) {
-        if (from == s.C_Str()) {
-            s = to;
-        }
-    };
-    for (unsigned m = 0; m < scene.mNumMeshes; ++m) {
-        for (unsigned b = 0; b < scene.mMeshes[m]->mNumBones; ++b) {
-            fix(scene.mMeshes[m]->mBones[b]->mName);
-        }
-    }
-    for (unsigned a = 0; a < scene.mNumAnimations; ++a) {
-        aiAnimation* anim = scene.mAnimations[a];
-        for (unsigned c = 0; c < anim->mNumChannels; ++c) {
-            fix(anim->mChannels[c]->mNodeName);
-        }
-    }
 }
 
 bool collapseLodWrapper(aiNode* parent, const std::set<std::string>& referenced)
@@ -235,17 +186,10 @@ bool collapseLodWrapper(aiNode* parent, const std::set<std::string>& referenced)
     return true;
 }
 
-bool lodAnchorNeeded(const aiScene& scene, const std::string& formatId)
+bool lodAnchorNeeded(const aiScene& scene)
 {
     const aiNode* root = scene.mRootNode;
-    if (!root) {
-        return false;
-    }
-    const bool gltf = formatId == "gltf2" || formatId == "gltf1";
-    if (gltf && std::strcmp(root->mName.C_Str(), "ROOT") != 0 && !startsWithCi(root->mName.C_Str(), "base") && lodAnchor(root)) {
-        return true;
-    }
-    if (lodAnchor(root)) {
+    if (!root || lodAnchor(root) || isBaseStart(root)) {
         return false;
     }
     for (unsigned i = 0; i < root->mNumChildren; ++i) {
@@ -258,29 +202,20 @@ bool lodAnchorNeeded(const aiScene& scene, const std::string& formatId)
     return false;
 }
 
-void anchorGameLod(aiScene& scene, const std::string& formatId, ConvertResult& r)
+void anchorGameLod(aiScene& scene, ConvertResult& r)
 {
     aiNode* root = scene.mRootNode;
     if (!root) {
         return;
     }
-    const bool gltf = formatId == "gltf2" || formatId == "gltf1";
     const std::set<std::string> referenced = referencedNodeNames(scene);
     int folded = 0;
-    while (!lodAnchor(root) && collapseLodWrapper(root, referenced)) {
+    while (!lodAnchor(root) && !isBaseStart(root) && collapseLodWrapper(root, referenced)) {
         ++folded;
     }
     if (folded) {
         r.log.push_back(format("lod: folded %d wrapper node(s) so base/start stays visible", folded));
     }
-    if (!gltf || !lodAnchor(root) || root->mNumMeshes || std::strcmp(root->mName.C_Str(), "ROOT") == 0 ||
-        startsWithCi(root->mName.C_Str(), "base")) {
-        return;
-    }
-    const std::string old = root->mName.C_Str();
-    renameReferences(scene, old, "ROOT");
-    root->mName = "ROOT";
-    r.log.push_back("lod: named the root ROOT so the game does not add a second one");
 }
 
 // The FBX exporter merges all meshes of a node into one geometry and writes UV and color layers
@@ -318,6 +253,14 @@ aiScene* fbxScene(const aiScene& in)
         }
     };
     walk(walk, copy->mRootNode);
+    // The exporter drops the root node itself, so the real root moves under a fresh one.
+    aiNode* root = copy->mRootNode;
+    aiNode* top = new aiNode("gdc_root");
+    top->mChildren = new aiNode*[1]{root};
+    top->mNumChildren = 1;
+    root->mParent = top;
+    copy->mRootNode = top;
+    std::swap(top->mMetaData, root->mMetaData);
     return copy;
 }
 
@@ -472,8 +415,10 @@ bool writeAssimp(const aiScene& scene, const Format& target, const nlohmann::jso
 {
     Assimp::Exporter exporter;
     Assimp::ExportProperties props;
-    // The default (0.01) drops node transforms that are close to identity, such as a 0.3 mm offset.
-    props.SetPropertyFloat(AI_CONFIG_CHECK_IDENTITY_MATRIX_EPSILON, 0.0f);
+    if (target.id == "gltf2" || target.id == "gltf1") {
+        // The glTF exporters' default (0.01) drops node transforms close to identity, such as a 0.3 mm offset.
+        props.SetPropertyFloat(AI_CONFIG_CHECK_IDENTITY_MATRIX_EPSILON, 0.0f);
+    }
     auto setBool = [&](const char* prop, const char* key) {
         if (std::any_of(target.settings.begin(), target.settings.end(), [&](const SettingDef& s) { return s.key == key; })) {
             props.SetPropertyBool(prop, settingBool(target, settings, key));
@@ -493,11 +438,6 @@ bool writeAssimp(const aiScene& scene, const Format& target, const nlohmann::jso
     } else if (target.id == "gltf2" || target.id == "gltf1") {
         owned.reset(gltfScene(scene));
         out = owned.get();
-        if (target.id == "gltf2") {
-            if (const unsigned added = addGameTangents(*owned)) {
-                r.log.push_back(format("tangents: added game tangents to %u mesh(es)", added));
-            }
-        }
     } else if (target.id == "fbx") {
         owned.reset(fbxScene(scene));
         out = owned.get();
@@ -520,17 +460,17 @@ bool writeAssimp(const aiScene& scene, const Format& target, const nlohmann::jso
             Assimp::SceneCombiner::CopyScene(&copy, &scene);
             owned.reset(copy);
         }
-        applyYUpFrame(*owned, frame.wrapRoot);
+        rotateScene(*owned, zUpToYUp());
         out = owned.get();
     }
-    if (lodAnchorNeeded(*out, target.id)) {
+    if (lodAnchorNeeded(*out)) {
         if (!owned) {
             aiScene* copy = nullptr;
             Assimp::SceneCombiner::CopyScene(&copy, out);
             owned.reset(copy);
             out = owned.get();
         }
-        anchorGameLod(*owned, target.id, r);
+        anchorGameLod(*owned, r);
         out = owned.get();
     }
     if (exporter.Export(out, target.exporterId(settings), path, 0, &props) != aiReturn_SUCCESS) {
@@ -538,6 +478,9 @@ bool writeAssimp(const aiScene& scene, const Format& target, const nlohmann::jso
         if (r.error.empty()) {
             r.error = "Assimp export failed";
         }
+        return false;
+    }
+    if (target.id == "gltf2" && !gltfDropEmptyRoot(path, r.error)) {
         return false;
     }
     if (target.id == "gltf2" && settingBool(target, settings, "draco")) {
@@ -684,11 +627,7 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
     if (!target.isTs) {
         checkUpAxis(r.report, writerFrame(target.id).up, readRawFrame(outputPath), before);
         if (writtenScene && scene) {
-            checkGameLod(r.report, target.id, *writtenScene, *scene, caps.hierarchy);
-            checkSeams(r.report, *writtenScene, *scene, toleranceFor(target, settings).posRel);
-            if (target.id == "gltf2") {
-                checkTangents(r.report, *writtenScene, *scene);
-            }
+            checkGameLod(r.report, *writtenScene, *scene, caps.hierarchy);
         }
     }
     r.validated = true;

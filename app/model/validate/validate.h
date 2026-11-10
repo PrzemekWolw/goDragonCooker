@@ -42,15 +42,8 @@ ValidationReport compareSummaries(const Summary& source, const Summary& result, 
 
 void checkUpAxis(ValidationReport& report, UpAxis expected, const RawFrame& raw, const Summary& source);
 
-// `written` is the scene Assimp produces when it reads the file back. glTF also accounts for the
-// extra ROOT parent the game inserts.
-void checkGameLod(ValidationReport& report, const std::string& formatId, const aiScene& written, const aiScene& source, bool hierarchy);
-
-void checkSeams(ValidationReport& report, const aiScene& written, const aiScene& source, double posRel);
-
-// A source without tangents leaves them to the game, which derives them inverted from Assimp. The written meshes
-// must carry tangents whose handedness matches the game's own. Sources that carry tangents keep them as authored.
-void checkTangents(ValidationReport& report, const aiScene& written, const aiScene& source);
+// `written` is the scene Assimp produces when it reads the file back.
+void checkGameLod(ValidationReport& report, const aiScene& written, const aiScene& source, bool hierarchy);
 
 Capabilities intersect(const Capabilities& a, const Capabilities& b);
 

@@ -9,7 +9,23 @@
 
 #include <assimp/scene.h>
 
+#include "core/strings.h"
+
 namespace model {
+
+bool isBaseStart(const aiNode* node)
+{
+    if (!node || !hasPrefix(toLower(node->mName.C_Str()), "base")) {
+        return false;
+    }
+    for (unsigned i = 0; i < node->mNumChildren; ++i) {
+        if (hasPrefix(toLower(node->mChildren[i]->mName.C_Str()), "start")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 namespace {
 
 using namespace ts;
@@ -329,9 +345,10 @@ Summary summarize(const aiScene& scene)
         byName.emplace(n->mName.C_Str(), n);
         order.push_back(n);
         // Mesh-only leaves (body200) are object holders, not bones; TSShape folds them into their parent.
-        if (n != scene.mRootNode && !(n->mNumMeshes && !n->mNumChildren)) {
+        const bool kept = n != scene.mRootNode || isBaseStart(n);
+        if (kept && !(n->mNumMeshes && !n->mNumChildren)) {
             s.nodes.push_back({n->mName.C_Str(), rigidOf(w)});
-        } else if (n != scene.mRootNode) {
+        } else if (kept) {
             s.meshHolders.push_back(n->mName.C_Str());
         }
         for (unsigned i = 0; i < n->mNumChildren; ++i) {

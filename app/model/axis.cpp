@@ -45,6 +45,60 @@ aiMatrix4x4 colladaUpToZUp(UpAxis up)
     }
 }
 
+void rotateScene(aiScene& scene, const aiMatrix4x4& rot)
+{
+    const aiMatrix3x3 r3(rot);
+    aiMatrix4x4 inv = rot;
+    inv.Inverse();
+    const auto rotateAll = [&](aiVector3D* v, unsigned count) {
+        for (unsigned i = 0; v && i < count; ++i) {
+            v[i] = r3 * v[i];
+        }
+    };
+    auto nodes = [&](auto& self, aiNode* n) -> void {
+        n->mTransformation = rot * n->mTransformation * inv;
+        for (unsigned i = 0; i < n->mNumChildren; ++i) {
+            self(self, n->mChildren[i]);
+        }
+    };
+    nodes(nodes, scene.mRootNode);
+    for (unsigned m = 0; m < scene.mNumMeshes; ++m) {
+        aiMesh* mesh = scene.mMeshes[m];
+        rotateAll(mesh->mVertices, mesh->mNumVertices);
+        rotateAll(mesh->mNormals, mesh->mNumVertices);
+        rotateAll(mesh->mTangents, mesh->mNumVertices);
+        rotateAll(mesh->mBitangents, mesh->mNumVertices);
+        for (unsigned b = 0; b < mesh->mNumBones; ++b) {
+            mesh->mBones[b]->mOffsetMatrix = rot * mesh->mBones[b]->mOffsetMatrix * inv;
+        }
+        for (unsigned a = 0; a < mesh->mNumAnimMeshes; ++a) {
+            aiAnimMesh* am = mesh->mAnimMeshes[a];
+            rotateAll(am->mVertices, am->mNumVertices);
+            rotateAll(am->mNormals, am->mNumVertices);
+            rotateAll(am->mTangents, am->mNumVertices);
+            rotateAll(am->mBitangents, am->mNumVertices);
+        }
+    }
+    const auto absRow = [&](const aiVector3D& s, unsigned row) {
+        return std::abs(r3[row][0]) * s.x + std::abs(r3[row][1]) * s.y + std::abs(r3[row][2]) * s.z;
+    };
+    for (unsigned a = 0; a < scene.mNumAnimations; ++a) {
+        for (unsigned c = 0; c < scene.mAnimations[a]->mNumChannels; ++c) {
+            aiNodeAnim* ch = scene.mAnimations[a]->mChannels[c];
+            for (unsigned k = 0; k < ch->mNumPositionKeys; ++k) {
+                ch->mPositionKeys[k].mValue = r3 * ch->mPositionKeys[k].mValue;
+            }
+            for (unsigned k = 0; k < ch->mNumRotationKeys; ++k) {
+                ch->mRotationKeys[k].mValue = aiQuaternion(r3 * ch->mRotationKeys[k].mValue.GetMatrix() * aiMatrix3x3(inv));
+            }
+            for (unsigned k = 0; k < ch->mNumScalingKeys; ++k) {
+                const aiVector3D s = ch->mScalingKeys[k].mValue;
+                ch->mScalingKeys[k].mValue = aiVector3D(absRow(s, 0), absRow(s, 1), absRow(s, 2));
+            }
+        }
+    }
+}
+
 UpAxis importedUp(const std::string& ext)
 {
     static const std::set<std::string> zUp = {".stl", ".ply", ".3mf", ".smd", ".vta"};
@@ -57,7 +111,6 @@ WriterFrame writerFrame(const std::string& formatId)
     static const std::set<std::string> zUp = {"collada", "stl", "ply", "3ds", "3mf", "stp"};
     WriterFrame f;
     f.up = zUp.count(formatId) ? UpAxis::Z : UpAxis::Y;
-    f.wrapRoot = formatId == "fbx";
     return f;
 }
 

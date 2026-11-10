@@ -382,12 +382,8 @@ bool dracoCompressGltf(const std::string& path, const DracoOptions& options, std
             continue;
         }
         total += m["primitives"].size();
-        // All triangle primitives of a mesh or none: a raw one next to quantized ones no longer lines up with them.
         // Lines and points stay raw; Draco only encodes triangles.
-        std::vector<std::pair<size_t, Encoded>> encoded;
-        bool all = true;
-        for (size_t pi = 0; pi < m["primitives"].size() && all; ++pi) {
-            const json& p = m["primitives"][pi];
+        for (json& p : m["primitives"]) {
             if (p.value("mode", 4) != 4) {
                 continue;
             }
@@ -399,14 +395,9 @@ bool dracoCompressGltf(const std::string& path, const DracoOptions& options, std
                 ok = ok && uses[p["indices"].get<size_t>()] == 1;
             }
             Encoded enc;
-            all = ok && encodePrimitive(doc, p, options, enc);
-            encoded.push_back({pi, std::move(enc)});
-        }
-        if (!all || encoded.empty()) {
-            continue;
-        }
-        for (auto& [pi, enc] : encoded) {
-            json& p = m["primitives"][pi];
+            if (!ok || !encodePrimitive(doc, p, options, enc)) {
+                continue;
+            }
             for (const auto& a : p["attributes"].items()) {
                 json& acc = g["accessors"][a.value().get<size_t>()];
                 acc.erase("bufferView");

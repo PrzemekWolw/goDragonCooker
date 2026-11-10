@@ -8,6 +8,7 @@
 template <typename T>
 class aiMatrix4x4t;
 typedef aiMatrix4x4t<float> aiMatrix4x4;
+struct aiScene;
 
 namespace model {
 
@@ -22,11 +23,13 @@ aiMatrix4x4 colladaUpToZUp(UpAxis up);
 
 UpAxis importedUp(const std::string& ext);
 
-// How a writer stores the scene: the frame of the written coordinates, and whether Assimp's exporter drops
-// the root node's transform (FBX), so the rotation has to sit on a node below a new root.
+// Rotates the whole scene the way Blender converts between Z-up and Y-up: vertex data (and skin/animation data)
+// is rotated and every node transform conjugated, so a node keeps its orientation relative to its geometry.
+void rotateScene(aiScene& scene, const aiMatrix4x4& rot);
+
+// The frame of the coordinates a writer stores.
 struct WriterFrame {
     UpAxis up = UpAxis::Y;
-    bool wrapRoot = false;
 };
 WriterFrame writerFrame(const std::string& formatId);
 
