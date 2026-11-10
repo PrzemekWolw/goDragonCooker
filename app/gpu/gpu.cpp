@@ -66,7 +66,9 @@ static std::vector<GpuAdapter> enumerateDXGIAdapters()
             break;
         }
         DXGI_ADAPTER_DESC1 description = {};
-        if (SUCCEEDED(adapter->GetDesc1(&description)) && (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
+        // 0x1414 is Microsoft's basic display and render adapter, not a GPU.
+        if (SUCCEEDED(adapter->GetDesc1(&description)) && (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0 &&
+            description.VendorId != 0x1414) {
             std::string name = u8str(fs::path(description.Description));
             if (!name.empty()) {
                 adapters.push_back({int(index), name, uint64_t(description.DedicatedVideoMemory),
@@ -188,17 +190,21 @@ std::vector<std::string> preferredGPUArgs()
         std::lock_guard lock(app.mu);
         configuredGPU = app.gpuAdapter;
     }
-    if (configuredGPU >= 0) {
+    auto known = [](int index) { return gpuAdapterName(index) != "unknown"; };
+    if (configuredGPU >= 0 && known(configuredGPU)) {
         return {"-gpu", std::to_string(configuredGPU)};
     }
     {
         std::lock_guard lock(gpuIndexMu);
-        if (selectedGPU >= 0) {
+        if (selectedGPU >= 0 && known(selectedGPU)) {
             return {"-gpu", std::to_string(selectedGPU)};
         }
     }
     const std::vector<int> indices = gpuAdapterCandidates();
-    return {"-gpu", std::to_string(indices.empty() ? 0 : indices.front())};
+    if (indices.empty()) {
+        return {"-nogpu"};
+    }
+    return {"-gpu", std::to_string(indices.front())};
 }
 
 void setSelectedGPU(int index)
@@ -296,9 +302,15 @@ static std::vector<std::string> checkTexconvGPU()
         std::lock_guard lock(app.mu);
         configuredGPU = app.gpuAdapter;
     }
-    std::vector<int> indices = configuredGPU >= 0 ? std::vector<int>{configuredGPU} : gpuAdapterCandidates();
+    std::vector<int> indices = configuredGPU >= 0 && gpuAdapterName(configuredGPU) != "unknown"
+                                   ? std::vector<int>{configuredGPU}
+                                   : gpuAdapterCandidates();
     if (indices.empty()) {
+#if defined(_WIN32)
+        return {"Texconv BC7 GPU: no adapter"};
+#else
         indices = {-1};
+#endif
     }
 
     std::vector<std::string> result;

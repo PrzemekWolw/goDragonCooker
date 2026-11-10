@@ -1,5 +1,6 @@
 #include "texture/texconv.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cwchar>
 #include <mutex>
@@ -139,6 +140,9 @@ std::string texconvRun(const std::vector<std::string>& args, bool forceCPU)
 
     std::vector<std::wstring> wideArgs;
     std::vector<wchar_t*> argv;
+    if (forceCPU && std::find(args.begin(), args.end(), "-nogpu") == args.end()) {
+        wideArgs.push_back(L"-nogpu");
+    }
     for (const std::string& arg : args) {
         wideArgs.push_back(toWide(arg));
     }
