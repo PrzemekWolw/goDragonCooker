@@ -3,10 +3,15 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <map>
+#include <memory>
+#include <set>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 
+#include <assimp/SceneCombiner.h>
 #include <assimp/scene.h>
 
 #include "core/strings.h"
@@ -26,7 +31,50 @@ bool isBaseStart(const aiNode* node)
     return false;
 }
 
+bool lodAnchor(const aiNode* node)
+{
+    for (unsigned i = 0; node && i < node->mNumChildren; ++i) {
+        if (isBaseStart(node->mChildren[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
 namespace {
+
+void foldMeshNodes(aiScene& scene, const std::function<std::string(const std::string&, const std::string&)>& rule)
+{
+    auto walk = [&](auto& self, aiNode* n) -> void {
+        std::vector<aiNode*> kept;
+        std::vector<unsigned> meshes(n->mMeshes, n->mMeshes + n->mNumMeshes);
+        for (unsigned i = 0; i < n->mNumChildren; ++i) {
+            aiNode* c = n->mChildren[i];
+            self(self, c);
+            const std::string parent = n->mName.C_Str();
+            if (!c->mNumChildren && c->mNumMeshes && rule(c->mName.C_Str(), parent) == parent && parent != c->mName.C_Str()) {
+                meshes.insert(meshes.end(), c->mMeshes, c->mMeshes + c->mNumMeshes);
+                delete c;
+            } else {
+                kept.push_back(c);
+            }
+        }
+        if (kept.size() == n->mNumChildren) {
+            return;
+        }
+        delete[] n->mMeshes;
+        n->mNumMeshes = unsigned(meshes.size());
+        n->mMeshes = meshes.empty() ? nullptr : new unsigned[meshes.size()];
+        std::copy(meshes.begin(), meshes.end(), n->mMeshes);
+        n->mNumChildren = unsigned(kept.size());
+        std::copy(kept.begin(), kept.end(), n->mChildren);
+        if (kept.empty()) {
+            delete[] n->mChildren;
+            n->mChildren = nullptr;
+        }
+    };
+    walk(walk, scene.mRootNode);
+}
 
 using namespace ts;
 
@@ -166,14 +214,23 @@ Summary summarize(const Shape& shape, const DetailFilter& filter)
 {
     Summary s;
     const std::vector<Mat4> world = shape.defaultWorldTransforms();
+    s.tsObjects = true;
     for (size_t i = 0; i < shape.nodes.size(); ++i) {
-        s.nodes.push_back({shape.name(shape.nodes[i].nameIndex), world[i]});
+        const int p = shape.nodes[i].parentIndex;
+        NodePose n;
+        n.name = shape.name(shape.nodes[i].nameIndex);
+        n.parent = p >= 0 && p < int(shape.nodes.size()) ? shape.name(shape.nodes[p].nameIndex) : "";
+        n.world = world[i];
+        s.nodes.push_back(std::move(n));
     }
     for (const Object& o : shape.objects) {
-        s.objects.push_back(shape.name(o.nameIndex));
+        const bool owned = o.nodeIndex >= 0 && o.nodeIndex < int(shape.nodes.size());
+        s.objects.push_back({shape.name(o.nameIndex), owned ? shape.name(shape.nodes[o.nodeIndex].nameIndex) : ""});
     }
     for (const Detail& d : shape.details) {
-        s.details.push_back({shape.name(d.nameIndex), d.size});
+        if (d.subShapeNum >= 0) { // billboard details hold no meshes
+            s.details.push_back({shape.name(d.nameIndex), d.size});
+        }
     }
     for (const Material& m : shape.materials) {
         s.materials.push_back(m.name);
@@ -258,6 +315,7 @@ Summary summarize(const Shape& shape, const DetailFilter& filter)
                 for (int i = p.start; i + 2 < p.start + p.numElements; i += 3) {
                     Tri t;
                     t.material = material;
+                    t.object = o;
                     t.group = filter.perDetail ? int(det.size) : 0;
                     bool valid = true;
                     for (int k = 0; k < 3; ++k) {
@@ -324,8 +382,17 @@ Summary summarize(const Shape& shape, const DetailFilter& filter)
     return s;
 }
 
-Summary summarize(const aiScene& scene)
+Summary summarize(const aiScene& scene, const SceneNames& names)
 {
+    if (names.meshNameOf && scene.mRootNode) {
+        aiScene* copy = nullptr;
+        Assimp::SceneCombiner::CopyScene(&copy, &scene);
+        const std::unique_ptr<aiScene> folded(copy);
+        foldMeshNodes(*folded, names.meshNameOf);
+        SceneNames plain = names;
+        plain.meshNameOf = nullptr;
+        return summarize(*folded, plain);
+    }
     Summary s;
     if (!scene.mRootNode) {
         return s;
@@ -333,29 +400,105 @@ Summary summarize(const aiScene& scene)
     for (unsigned i = 0; i < scene.mNumMaterials; ++i) {
         aiString name;
         scene.mMaterials[i]->Get(AI_MATKEY_NAME, name);
-        s.materials.push_back(name.C_Str());
+        s.materials.push_back(name.length || !names.tsNames ? name.C_Str() : "material" + std::to_string(i));
     }
+
+    // Detail sizes always follow the TS builder's reading; object names only in TS mode.
+    const ts::ObjectNaming naming = ts::objectNaming(scene, names.options);
+    std::unordered_set<std::string> collapse;
+    if (names.tsNames) {
+        collapse.insert(naming.collapse.begin(), naming.collapse.end());
+        collapse.insert(names.collapse.begin(), names.collapse.end());
+    }
+    s.tsObjects = names.tsNames;
 
     std::unordered_map<std::string, const aiNode*> byName;
     std::unordered_map<const aiNode*, Mat4> worldOf;
+    std::unordered_map<const aiNode*, std::string> keptName; // node -> its name in `nodes`
     std::vector<const aiNode*> order;
-    auto walk = [&](auto& self, const aiNode* n, const Mat4& parent) -> void {
+    std::unordered_set<std::string> taken;
+    auto walk = [&](auto& self, const aiNode* n, const Mat4& parent, const std::string& parentName) -> void {
         const Mat4 w = parent * fromAi(n->mTransformation);
         worldOf[n] = w;
         byName.emplace(n->mName.C_Str(), n);
         order.push_back(n);
-        // Mesh-only leaves (body200) are object holders, not bones; TSShape folds them into their parent.
-        const bool kept = n != scene.mRootNode || isBaseStart(n);
-        if (kept && !(n->mNumMeshes && !n->mNumChildren)) {
-            s.nodes.push_back({n->mName.C_Str(), rigidOf(w)});
-        } else if (kept) {
-            s.meshHolders.push_back(n->mName.C_Str());
+        // A meshless root is an importer container; a root that holds meshes is a part (the TS builder keeps it too).
+        const bool isRoot = n == scene.mRootNode;
+        bool kept = !isRoot || isBaseStart(n) || n->mNumMeshes;
+        kept = kept && !ts::generatedNode(*n, collapse);
+        std::string childParent = parentName;
+        if (kept) {
+            NodePose pose;
+            pose.name = n->mName.C_Str();
+            if (names.tsNames) {
+                const std::string unique = ts::uniqueName(pose.name.empty() ? "node" : pose.name, taken);
+                if (unique != pose.name) {
+                    s.renamed.push_back({pose.name, unique});
+                }
+                pose.name = unique;
+            }
+            pose.parent = parentName;
+            pose.world = rigidOf(w);
+            pose.meshHolder = n->mNumMeshes && !n->mNumChildren;
+            pose.mirrored = determinant3(w) < 0.0f;
+            keptName[n] = pose.name;
+            childParent = pose.name;
+            s.nodes.push_back(std::move(pose));
         }
         for (unsigned i = 0; i < n->mNumChildren; ++i) {
-            self(self, n->mChildren[i], w);
+            self(self, n->mChildren[i], w, childParent);
         }
     };
-    walk(walk, scene.mRootNode, Mat4{});
+    walk(walk, scene.mRootNode, Mat4{}, "");
+
+    // Object per mesh node: TS mode groups detail meshes into one object owned by its highest detail's node.
+    auto ownerName = [&](const aiNode* n) {
+        for (; n; n = n->mParent) {
+            auto it = keptName.find(n);
+            if (it != keptName.end()) {
+                return it->second;
+            }
+        }
+        return std::string();
+    };
+    std::unordered_map<const aiNode*, int> objectOf;
+    std::set<float> sizes;
+    {
+        std::map<std::string, int> byObject;
+        std::vector<int> ownerSize;
+        std::set<int> skinned;
+        for (const ts::MeshNodeObject& mn : naming.meshNodes) {
+            if (naming.trailing) {
+                sizes.insert(float(mn.size));
+            }
+            int index = int(s.objects.size());
+            if (names.tsNames) {
+                auto it = byObject.emplace(toLower(mn.object), index).first;
+                index = it->second;
+            }
+            if (index == int(s.objects.size())) {
+                s.objects.push_back({names.tsNames ? mn.object : std::string(mn.node->mName.C_Str()), ""});
+                ownerSize.push_back(std::numeric_limits<int>::min());
+            }
+            objectOf[mn.node] = index;
+            if (mn.size > ownerSize[index]) {
+                ownerSize[index] = mn.size;
+                s.objects[index].node = names.tsNames ? ownerName(mn.node) : std::string(mn.node->mName.C_Str());
+            }
+            for (unsigned k = 0; k < mn.node->mNumMeshes; ++k) {
+                if (scene.mMeshes[mn.node->mMeshes[k]]->mNumBones > 0) {
+                    skinned.insert(index);
+                }
+            }
+        }
+        // The TS builder leaves skinned objects without a node.
+        for (int index : names.tsNames ? skinned : std::set<int>{}) {
+            s.objects[index].node.clear();
+        }
+    }
+    for (auto it = sizes.rbegin(); it != sizes.rend(); ++it) {
+        s.details.push_back({"", *it});
+    }
 
     bool firstBound = true;
     for (const aiNode* n : order) {
@@ -363,12 +506,13 @@ Summary summarize(const aiScene& scene)
             continue;
         }
         const Mat4 nodeWorld = worldOf[n];
+        auto obj = objectOf.find(n);
+        const int objectIndex = obj != objectOf.end() ? obj->second : -1;
         for (unsigned k = 0; k < n->mNumMeshes; ++k) {
             const aiMesh* am = scene.mMeshes[n->mMeshes[k]];
             if (!(am->mPrimitiveTypes & (aiPrimitiveType_TRIANGLE | aiPrimitiveType_POLYGON))) {
                 continue;
             }
-            s.objects.push_back(n->mName.C_Str());
             const unsigned nv = am->mNumVertices;
             s.vertexCount += nv;
             s.morphTargets += int(am->mNumAnimMeshes);
@@ -383,7 +527,7 @@ Summary summarize(const aiScene& scene)
             if (am->mNumBones) {
                 ++s.skinnedMeshes;
                 std::vector<std::vector<std::pair<Mat4, float>>> parts(nv);
-                std::vector<std::map<std::string, float>> names(nv);
+                std::vector<std::map<std::string, float>> byBone(nv);
                 for (unsigned b = 0; b < am->mNumBones; ++b) {
                     const aiBone* bone = am->mBones[b];
                     auto it = byName.find(bone->mName.C_Str());
@@ -393,18 +537,18 @@ Summary summarize(const aiScene& scene)
                         const aiVertexWeight& vw = bone->mWeights[w];
                         if (vw.mVertexId < nv && vw.mWeight > 0) {
                             parts[vw.mVertexId].push_back({m, vw.mWeight});
-                            names[vw.mVertexId][bone->mName.C_Str()] += vw.mWeight;
+                            byBone[vw.mVertexId][bone->mName.C_Str()] += vw.mWeight;
                         }
                     }
                 }
                 for (unsigned v = 0; v < nv; ++v) {
                     xf[v] = blend(parts[v], nodeWorld);
                     float total = 0;
-                    for (const auto& [b, w] : names[v]) {
+                    for (const auto& [b, w] : byBone[v]) {
                         total += w;
                     }
                     std::vector<Influence> list;
-                    for (const auto& [b, w] : names[v]) {
+                    for (const auto& [b, w] : byBone[v]) {
                         list.push_back({b, total > 0 ? w / total : 0.0f});
                     }
                     skinIndex[v] = int(s.influences.size());
@@ -448,6 +592,7 @@ Summary summarize(const aiScene& scene)
                     const bool mirrored = determinant3(xf[a]) < 0.0f;
                     Tri t;
                     t.material = int(am->mMaterialIndex);
+                    t.object = objectIndex;
                     corner(a, t.c[0]);
                     corner(mirrored ? b : d, t.c[1]);
                     corner(mirrored ? d : b, t.c[2]);

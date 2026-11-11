@@ -1231,6 +1231,21 @@ def run_self_tests(target: dict, stage: Path):
         "--back",
         str(model),
     ])
+    hierarchy = data / "hierarchy.dae"
+    hier_out = PROJECT / ".build" / f"selftest-hierarchy-{target['name']}"
+    if hier_out.exists():
+        remove_tree(hier_out)
+    run_report([
+        str(binaries["gdc_model_test"]),
+        "--convert", "glb,dae,fbx,obj,x,cdae,dts",
+        "--out", str(hier_out),
+        "--back",
+        str(hierarchy),
+    ])
+    run_report([str(binaries["gdc_model_test"]), "--corrupt-structure", "--out", str(hier_out), str(hierarchy)])
+    caps_out = hier_out / "caps"
+    caps_out.mkdir(parents=True, exist_ok=True)
+    run_report([str(binaries["gdc_model_test"]), "--caps", "--out", str(caps_out), str(hierarchy)])
 
     cook = str(binaries["gdc_cook_test"])
     cooked = PROJECT / ".build" / f"selftest-cook-{target['name']}"

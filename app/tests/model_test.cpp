@@ -1,7 +1,7 @@
 // gdc_model_test: round-trips DTS/CDAE files and prints a per-file pass/fail line. With --convert,
 // converts every readable model to the listed targets through the converter and validates it.
 // Usage: gdc_model_test [--verbose] [--allow-reject <filename>]... [--convert glb,dae,... --out <dir> [--back]
-//        [--report <file.json>]] [--dump] <file-or-dir>...
+//        [--report <file.json>]] [--dump] [--caps --out <dir>] [--corrupt-structure] <file-or-dir>...
 // Targets: glb, gltf, glb-draco, dae, fbx, obj, cdae, dts (v29), dts24..dts29, any writable format id, or all.
 #if defined(_DEBUG) && defined(_MSC_VER)
 #include <crtdbg.h>
@@ -11,7 +11,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -415,22 +417,223 @@ void dumpFile(const std::string& path)
     for (const model::Tri& t : s.tris) {
         ++counts[t.material >= 0 && t.material < int(s.materials.size()) ? s.materials[t.material] : "<none>"];
     }
-    std::printf("%s: %zu tris, %zu nodes, %zu mesh holders\n", path.c_str(), s.tris.size(), s.nodes.size(), s.meshHolders.size());
+    const size_t holders = std::count_if(s.nodes.begin(), s.nodes.end(), [](const model::NodePose& n) { return n.meshHolder; });
+    std::printf("%s: %zu tris, %zu nodes, %zu mesh holders, %zu objects\n", path.c_str(), s.tris.size(), s.nodes.size() - holders,
+                holders, s.objects.size());
     for (const auto& [name, n] : counts) {
         std::printf("  %8zu %s\n", n, name.c_str());
     }
     if (verbose) {
         for (const model::NodePose& n : s.nodes) {
-            std::printf("  node %s\n", n.name.c_str());
+            std::printf("  %s %s (parent %s)\n", n.meshHolder ? "holder" : "node", n.name.c_str(), n.parent.empty() ? "-" : n.parent.c_str());
         }
-        for (const std::string& n : s.meshHolders) {
-            std::printf("  holder %s\n", n.c_str());
+        for (const model::ObjectInfo& o : s.objects) {
+            std::printf("  object %s (node %s)\n", o.name.c_str(), o.node.empty() ? "-" : o.node.c_str());
         }
     }
 }
 
+bool capsOnly = false;
+
+// Writes `path` to every Assimp writer and prints which node, mesh and material names come back. A mesh name lost
+// by a format that claims Capabilities::meshNames, or a node tree lost by one that claims hierarchy, is a failure.
+void capsFile(const std::string& path)
+{
+    model::Model source;
+    std::string error;
+    std::vector<std::string> warnings, ignored;
+    if (!source.load(path, error, warnings)) {
+        report(path, "load", error);
+        return;
+    }
+    const model::Summary src = model::summarize(*source.scene({}, ignored));
+    std::set<std::string> meshNames, nodeNames;
+    for (const model::ObjectInfo& o : src.objects) {
+        meshNames.insert(toLower(o.name));
+    }
+    for (const model::NodePose& n : src.nodes) {
+        if (!n.meshHolder) {
+            nodeNames.insert(toLower(n.name) + " < " + toLower(n.parent));
+        }
+    }
+    const std::string stem = fs::u8path(path).filename().u8string();
+    for (const model::Format* f : model::writableFormats()) {
+        if (f->isTs) {
+            continue;
+        }
+        const std::string ext = f->outputExt(model::withDefaults(*f, {}));
+        const std::string out = (fs::u8path(outDir) / fs::u8path(stem + ".caps." + f->id + ext)).u8string();
+        model::ConvertOptions o;
+        o.target = f;
+        const model::ConvertResult r = model::convertModel(source, out, o);
+        model::Model back;
+        std::vector<std::string> w;
+        if (!r.ok || !model::readerForExt(model::modelExtension(out)) || !back.load(out, error, w)) {
+            std::printf("%-10s not read back (%s)\n", f->id.c_str(), r.ok ? error.c_str() : r.error.c_str());
+            continue;
+        }
+        const model::Summary got = model::summarize(*back.scene({}, ignored), model::SceneNames{false, {}, f->meshNameOf});
+        std::set<std::string> gotMeshes, gotNodes;
+        std::string meshList, nodeList;
+        for (const model::ObjectInfo& obj : got.objects) {
+            gotMeshes.insert(toLower(obj.name));
+            meshList += " " + obj.name;
+        }
+        for (const model::NodePose& n : got.nodes) {
+            // A writer may promote the source's root container to a node; parents outside the source count as top level.
+            const bool known = std::any_of(src.nodes.begin(), src.nodes.end(), [&](const model::NodePose& s) { return s.name == n.parent; });
+            if (!n.meshHolder) {
+                gotNodes.insert(toLower(n.name) + " < " + (known ? toLower(n.parent) : ""));
+            }
+            nodeList += format(" %s<%s", n.name.c_str(), n.parent.c_str());
+        }
+        size_t lostMeshes = 0, lostNodes = 0, movedNodes = 0;
+        for (const std::string& n : meshNames) {
+            lostMeshes += !gotMeshes.count(n);
+        }
+        for (const std::string& n : nodeNames) {
+            lostNodes += !gotNodes.count(n);
+        }
+        for (const model::NodePose& a : src.nodes) {
+            for (const model::NodePose& b : got.nodes) {
+                if (!a.meshHolder && !b.meshHolder && toLower(a.name) == toLower(b.name)) {
+                    float d = 0;
+                    for (int k = 0; k < 3; ++k) {
+                        d = std::max(d, std::abs(a.world.at(k, 3) - b.world.at(k, 3)));
+                    }
+                    movedNodes += d > 1e-3f;
+                }
+            }
+        }
+        const bool bad = (f->caps.meshNames && lostMeshes) || (f->caps.hierarchy && lostNodes) || (f->caps.hierarchy && f->caps.poses && movedNodes);
+        std::printf("%-10s meshNames %d (lost %zu/%zu)  hierarchy %d (lost %zu/%zu)  poses %d (moved %zu)%s\n", f->id.c_str(),
+                    f->caps.meshNames, lostMeshes, meshNames.size(), f->caps.hierarchy, lostNodes, nodeNames.size(), f->caps.poses,
+                    movedNodes, bad ? "  MISMATCH" : "");
+        if (verbose || bad) {
+            std::printf("      meshes:%s\n      nodes:%s\n", meshList.c_str(), nodeList.c_str());
+        }
+        failures += bad;
+    }
+}
+
+bool corruptOnly = false;
+
+// Each structural change to the source summary must fail validation; the unchanged summary and an STL conversion
+// (which keeps no names) must not.
+void corruptFile(const std::string& path)
+{
+    model::Model source;
+    std::string error;
+    std::vector<std::string> warnings, ignored;
+    if (!source.load(path, error, warnings)) {
+        report(path, "load", error);
+        return;
+    }
+    const model::Summary src = model::summarize(*source.scene({}, ignored));
+    auto node = [](model::Summary& s, const char* name) -> model::NodePose* {
+        for (model::NodePose& n : s.nodes) {
+            if (n.name == name) {
+                return &n;
+            }
+        }
+        return nullptr;
+    };
+    auto renameMesh = [&](model::Summary& s, const char* from, const std::string& to) {
+        model::NodePose* n = node(s, from);
+        for (model::ObjectInfo& o : s.objects) {
+            if (o.name == from) {
+                o.name = o.node = to;
+            }
+        }
+        if (n) {
+            n->name = to;
+        }
+        return n != nullptr;
+    };
+    auto material = [&](const char* name) {
+        const auto it = std::find(src.materials.begin(), src.materials.end(), name);
+        return it == src.materials.end() ? -1 : int(it - src.materials.begin());
+    };
+    struct Case {
+        const char* name;
+        std::function<bool(model::Summary&)> apply;
+    };
+    const std::vector<Case> cases = {
+        {"unchanged", [](model::Summary&) { return true; }},
+        {"rename mesh node", [&](model::Summary& s) { return renameMesh(s, "body50", "panel50"); }},
+        {"reparent node",
+         [&](model::Summary& s) {
+             model::NodePose* n = node(s, "door_hinge");
+             return n && (n->parent = "start01", true);
+         }},
+        {"move attach node",
+         [&](model::Summary& s) {
+             model::NodePose* n = node(s, "hardpoint");
+             return n && (n->world.at(2, 3) += 1.0f, true);
+         }},
+        {"swap triangle material",
+         [&](model::Summary& s) {
+             const int paint = material("paint"), glass = material("glass");
+             for (model::Tri& t : s.tris) {
+                 if (t.material == paint && glass >= 0) {
+                     t.material = glass;
+                     return true;
+                 }
+             }
+             return false;
+         }},
+        {"drop mesh name", [&](model::Summary& s) { return renameMesh(s, "door200", ""); }},
+    };
+    for (const Case& c : cases) {
+        model::Summary s = src;
+        if (!c.apply(s)) {
+            report(path, c.name, "the test file has no part to change");
+            continue;
+        }
+        const model::ValidationReport rep = model::compareSummaries(src, s, model::Capabilities{}, model::Tolerance{});
+        const bool failed = rep.verdict == model::Verdict::Fail;
+        const bool expectFail = std::strcmp(c.name, "unchanged") != 0;
+        report(path, c.name, failed == expectFail ? "" : expectFail ? "not detected" : "the unchanged summary fails");
+        if (verbose || failed != expectFail) {
+            for (const std::string& line : rep.lines) {
+                if (line.rfind("FAIL", 0) == 0) {
+                    std::printf("      %s\n", line.c_str());
+                }
+            }
+        }
+    }
+
+    const model::Format* stl = model::formatById("stl");
+    std::error_code ec;
+    const fs::path dir = outDir.empty() ? fs::temp_directory_path(ec) : fs::u8path(outDir);
+    const std::string out = (dir / fs::u8path(fs::u8path(path).stem().u8string() + ".corrupt.stl")).u8string();
+    model::ConvertOptions o;
+    o.target = stl;
+    const model::ConvertResult r = stl ? model::convertModel(source, out, o) : model::ConvertResult{};
+    std::string problem;
+    if (!r.ok) {
+        problem = stl ? r.error : "no stl format";
+    } else if (r.report.verdict == model::Verdict::Fail) {
+        for (const std::string& line : r.report.lines) {
+            if (line.rfind("FAIL", 0) == 0) {
+                problem += (problem.empty() ? "" : "; ") + line;
+            }
+        }
+    }
+    report(path, "stl keeps no names", problem);
+    fs::remove(fs::u8path(out), ec);
+}
+
 void testFile(const std::string& path)
 {
+    if (corruptOnly) {
+        corruptFile(path);
+        return;
+    }
+    if (capsOnly) {
+        capsFile(path);
+        return;
+    }
     if (axisOnly) {
         axisFile(path);
         return;
@@ -508,6 +711,10 @@ int main(int argc, char** argv)
             dumpOnly = true;
         } else if (std::strcmp(argv[i], "--names") == 0) {
             namesOnly = true;
+        } else if (std::strcmp(argv[i], "--caps") == 0) {
+            capsOnly = true;
+        } else if (std::strcmp(argv[i], "--corrupt-structure") == 0) {
+            corruptOnly = true;
         } else if (std::strcmp(argv[i], "--axis") == 0 && i + 1 < argc) {
             axisOnly = true;
             axisExpected = argv[++i][0] == 'Z' ? model::UpAxis::Z : model::UpAxis::Y;
@@ -521,7 +728,7 @@ int main(int argc, char** argv)
             inputs.push_back(argv[i]);
         }
     }
-    if (inputs.empty() || (!targets.empty() && outDir.empty())) {
+    if (inputs.empty() || ((!targets.empty() || capsOnly) && outDir.empty())) {
         std::fprintf(stderr, "usage: gdc_model_test [--verbose] [--allow-reject <filename>]... [--convert glb,dae,... --out <dir> "
                              "[--back] [--report <file.json>]] <file-or-dir>...\n");
         return 2;

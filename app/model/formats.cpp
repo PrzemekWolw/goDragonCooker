@@ -245,6 +245,9 @@ struct Registry {
             f.label = "Wavefront OBJ (.obj)";
             f.exts = {".obj"};
             f.caps.hierarchy = false;
+            // The exporter writes "g <mesh name>", not the node name. A probe whose mesh names equal the
+            // node names still round-trips; a real file does not, so the node name is not kept.
+            f.caps.meshNames = false;
             f.settings.push_back(boolSetting("mtl", "gdc.format.mtl.label", true));
             addSharedAssimpSettings(f.settings, true);
             f.exporterId = [](const nlohmann::json& v) { return std::string(v.value("mtl", 1) ? "obj" : "objnomtl"); };
@@ -256,7 +259,7 @@ struct Registry {
             f.id = "stl";
             f.label = "Stereolithography (.stl)";
             f.exts = {".stl"};
-            f.caps = {false, false, false, false, false, false, false, false, false, false, false};
+            f.caps = {false, false, false, false, false, false, false, false, false, false, false, false, false};
             f.settings.push_back(choiceSetting("container", "gdc.format.encoding.label", {"gdc.format.encoding.choice.binary", "gdc.format.encoding.choice.ascii"}, 0));
             addSharedAssimpSettings(f.settings, true);
             f.exporterId = [](const nlohmann::json& v) { return std::string(v.value("container", 0) == 1 ? "stl" : "stlb"); };
@@ -268,7 +271,7 @@ struct Registry {
             f.id = "ply";
             f.label = "Stanford PLY (.ply)";
             f.exts = {".ply"};
-            f.caps.hierarchy = f.caps.materials = false;
+            f.caps.hierarchy = f.caps.materials = f.caps.meshNames = false;
             f.caps.colors = true;
             f.settings.push_back(choiceSetting("container", "gdc.format.encoding.label", {"gdc.format.encoding.choice.binary", "gdc.format.encoding.choice.ascii"}, 0));
             addSharedAssimpSettings(f.settings, true);
@@ -305,9 +308,18 @@ struct Registry {
                 f.caps.uv2 = f.caps.colors = f.caps.tangents = f.caps.skins = f.caps.animations = f.caps.morphs = true;
             } else if (id == "3ds") {
                 f.caps.normals = false;
-                f.caps.hierarchy = false; // object names are limited to 10 characters
+                // The writer bakes node transforms into the vertices and keeps only the tree.
+                f.caps.poses = false;
+                // Each mesh comes back as a child "<node>_<mesh>_<index>" of its node.
+                f.meshNameOf = [](const std::string& name, const std::string& parent) {
+                    const size_t us = name.find_last_of('_');
+                    const bool indexed = us != std::string::npos && us + 1 < name.size() &&
+                                         name.find_first_not_of("0123456789", us + 1) == std::string::npos;
+                    return indexed && !parent.empty() && name.compare(0, parent.size() + 1, parent + "_") == 0 ? parent : name;
+                };
             } else if (id == "3mf" || id == "stp" || id == "pbrt") {
-                f.caps.hierarchy = false;
+                // Assimp's 3MF reader names objects "Object_<id>"; STEP and PBRT are not read back.
+                f.caps.hierarchy = f.caps.meshNames = false;
                 f.caps.uv = id == "pbrt";
                 f.caps.normals = id == "pbrt";
             }

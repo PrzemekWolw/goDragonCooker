@@ -1,6 +1,7 @@
 #include "model/axis.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <set>
@@ -128,6 +129,20 @@ std::optional<UpAxis> colladaDeclared(const std::string& path)
     return v.find('X') == 0 ? UpAxis::X : v.find('Y') == 0 ? UpAxis::Y : UpAxis::Z;
 }
 
+// COLLADA's <unit meter="..."/>. The game's assimp multiplies the root by it; 1 when the element is missing.
+std::optional<double> colladaMeter(const std::string& path)
+{
+    std::ifstream f(fs::u8path(path), std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const size_t p = text.find("meter=\"");
+    if (p == std::string::npos) {
+        return 1.0;
+    }
+    char* end = nullptr;
+    const double v = std::strtod(text.c_str() + p + 7, &end);
+    return end == text.c_str() + p + 7 ? std::optional<double>{} : v;
+}
+
 } // namespace
 
 RawFrame readRawFrame(const std::string& path)
@@ -144,12 +159,21 @@ RawFrame readRawFrame(const std::string& path)
     }
     if (ext == ".dae") {
         r.declared = colladaDeclared(path);
+        r.gameScale = colladaMeter(path);
     } else if (ext == ".fbx" && scene->mMetaData) {
         int32_t axis = 0, sign = 1;
         if (scene->mMetaData->Get("UpAxis", axis)) {
             r.declared = axis == 0 ? UpAxis::X : axis == 1 ? UpAxis::Y : UpAxis::Z;
             scene->mMetaData->Get("UpAxisSign", sign);
             r.declaredNegative = sign < 0;
+        }
+        // Stored as a float. The game's importer bakes this into the root and does not divide by 100.
+        float unit = 1.0f;
+        double unitD = 1.0;
+        if (scene->mMetaData->Get("UnitScaleFactor", unit)) {
+            r.gameScale = unit;
+        } else if (scene->mMetaData->Get("UnitScaleFactor", unitD)) {
+            r.gameScale = unitD;
         }
     } else if (ext == ".3ds") {
         // Assimp's 3DS reader turns the file's Z-up into Y-up on its own.
@@ -159,6 +183,13 @@ RawFrame readRawFrame(const std::string& path)
     const Summary s = summarize(*scene);
     r.hasGeometry = !s.tris.empty();
     r.bounds = s.bounds;
+    // FBX applies UnitScaleFactor in the root transform this read skipped (it ignores the up direction).
+    // COLLADA's meter is already in the root, so its bounds already include it.
+    if (ext == ".fbx" && r.gameScale && *r.gameScale != 1.0) {
+        const float k = float(*r.gameScale);
+        r.bounds.min = {r.bounds.min.x * k, r.bounds.min.y * k, r.bounds.min.z * k};
+        r.bounds.max = {r.bounds.max.x * k, r.bounds.max.y * k, r.bounds.max.z * k};
+    }
     r.ok = true;
     return r;
 }

@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset>
+    <unit name="meter" meter="1"/>
+    <up_axis>Z_UP</up_axis>
+  </asset>
+  <library_effects>
+    <effect id="paint-fx">
+      <profile_COMMON>
+        <technique sid="common">
+          <lambert>
+            <diffuse><color>0.8 0.1 0.1 1</color></diffuse>
+          </lambert>
+        </technique>
+      </profile_COMMON>
+    </effect>
+    <effect id="glass-fx">
+      <profile_COMMON>
+        <technique sid="common">
+          <lambert>
+            <diffuse><color>0.2 0.3 0.9 1</color></diffuse>
+          </lambert>
+        </technique>
+      </profile_COMMON>
+    </effect>
+  </library_effects>
+  <library_materials>
+    <material id="paint" name="paint">
+      <instance_effect url="#paint-fx"/>
+    </material>
+    <material id="glass" name="glass">
+      <instance_effect url="#glass-fx"/>
+    </material>
+  </library_materials>
+  <library_geometries>
+    <geometry id="body200-mesh" name="body200">
+      <mesh>
+        <source id="body200-pos">
+          <float_array id="body200-pos-array" count="21">0 0 0 2 0 0 2 1 0 0 1 0 0 0 1 1 0 1 0 1 1</float_array>
+          <technique_common>
+            <accessor source="#body200-pos-array" count="7" stride="3">
+              <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <source id="body200-nrm">
+          <float_array id="body200-nrm-array" count="21">0 0 1 0 0 1 0 0 1 0 0 1 0 0 1 0 0 1 0 0 1</float_array>
+          <technique_common>
+            <accessor source="#body200-nrm-array" count="7" stride="3">
+              <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="body200-vtx">
+          <input semantic="POSITION" source="#body200-pos"/>
+          <input semantic="NORMAL" source="#body200-nrm"/>
+        </vertices>
+        <triangles material="paint" count="2">
+          <input semantic="VERTEX" source="#body200-vtx" offset="0"/>
+          <p>0 1 2 0 2 3</p>
+        </triangles>
+        <triangles material="glass" count="1">
+          <input semantic="VERTEX" source="#body200-vtx" offset="0"/>
+          <p>4 5 6</p>
+        </triangles>
+      </mesh>
+    </geometry>
+    <geometry id="body50-mesh" name="body50">
+      <mesh>
+        <source id="body50-pos">
+          <float_array id="body50-pos-array" count="9">5 0 0 6 0 0 5 1 0</float_array>
+          <technique_common>
+            <accessor source="#body50-pos-array" count="3" stride="3">
+              <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <source id="body50-nrm">
+          <float_array id="body50-nrm-array" count="9">0 0 1 0 0 1 0 0 1</float_array>
+          <technique_common>
+            <accessor source="#body50-nrm-array" count="3" stride="3">
+              <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="body50-vtx">
+          <input semantic="POSITION" source="#body50-pos"/>
+          <input semantic="NORMAL" source="#body50-nrm"/>
+        </vertices>
+        <triangles material="paint" count="1">
+          <input semantic="VERTEX" source="#body50-vtx" offset="0"/>
+          <p>0 1 2</p>
+        </triangles>
+      </mesh>
+    </geometry>
+    <geometry id="door200-mesh" name="door200">
+      <mesh>
+        <source id="door200-pos">
+          <float_array id="door200-pos-array" count="12">0 0 0 1 0 0 1 0 1 0 0 1</float_array>
+          <technique_common>
+            <accessor source="#door200-pos-array" count="4" stride="3">
+              <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <source id="door200-nrm">
+          <float_array id="door200-nrm-array" count="12">0 -1 0 0 -1 0 0 -1 0 0 -1 0</float_array>
+          <technique_common>
+            <accessor source="#door200-nrm-array" count="4" stride="3">
+              <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="door200-vtx">
+          <input semantic="POSITION" source="#door200-pos"/>
+          <input semantic="NORMAL" source="#door200-nrm"/>
+        </vertices>
+        <triangles material="glass" count="2">
+          <input semantic="VERTEX" source="#door200-vtx" offset="0"/>
+          <p>0 1 2 0 2 3</p>
+        </triangles>
+      </mesh>
+    </geometry>
+    <geometry id="col-mesh" name="Colmesh-1">
+      <mesh>
+        <source id="col-pos">
+          <float_array id="col-pos-array" count="9">0 0 -1 2 0 -1 0 1 -1</float_array>
+          <technique_common>
+            <accessor source="#col-pos-array" count="3" stride="3">
+              <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <source id="col-nrm">
+          <float_array id="col-nrm-array" count="9">0 0 1 0 0 1 0 0 1</float_array>
+          <technique_common>
+            <accessor source="#col-nrm-array" count="3" stride="3">
+              <param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="col-vtx">
+          <input semantic="POSITION" source="#col-pos"/>
+          <input semantic="NORMAL" source="#col-nrm"/>
+        </vertices>
+        <triangles material="paint" count="1">
+          <input semantic="VERTEX" source="#col-vtx" offset="0"/>
+          <p>0 1 2</p>
+        </triangles>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_visual_scenes>
+    <visual_scene id="scene" name="scene">
+      <node id="base00" name="base00">
+        <node id="start01" name="start01">
+          <node id="body200" name="body200">
+            <instance_geometry url="#body200-mesh">
+              <bind_material><technique_common>
+                <instance_material symbol="paint" target="#paint"/>
+                <instance_material symbol="glass" target="#glass"/>
+              </technique_common></bind_material>
+            </instance_geometry>
+          </node>
+          <node id="body50" name="body50">
+            <instance_geometry url="#body50-mesh">
+              <bind_material><technique_common>
+                <instance_material symbol="paint" target="#paint"/>
+              </technique_common></bind_material>
+            </instance_geometry>
+          </node>
+          <node id="door200" name="door200">
+            <translate>0 -2 0</translate>
+            <instance_geometry url="#door200-mesh">
+              <bind_material><technique_common>
+                <instance_material symbol="glass" target="#glass"/>
+              </technique_common></bind_material>
+            </instance_geometry>
+            <node id="door_hinge" name="door_hinge">
+              <translate>0 0 0.5</translate>
+              <rotate>0 0 1 90</rotate>
+            </node>
+          </node>
+          <node id="Colmesh-1" name="Colmesh-1">
+            <instance_geometry url="#col-mesh">
+              <bind_material><technique_common>
+                <instance_material symbol="paint" target="#paint"/>
+              </technique_common></bind_material>
+            </instance_geometry>
+          </node>
+        </node>
+        <node id="hardpoint" name="hardpoint">
+          <translate>1 2 3</translate>
+        </node>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene>
+    <instance_visual_scene url="#scene"/>
+  </scene>
+</COLLADA>

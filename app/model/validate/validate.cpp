@@ -20,6 +20,28 @@ namespace {
 using namespace ts;
 
 constexpr double kPi = 3.14159265358979323846;
+constexpr size_t kShown = 4; // names listed in one report line
+
+// The first kShown of `names`, with "..." when `total` is larger.
+std::string listNames(const std::vector<std::string>& names, size_t total)
+{
+    std::string s;
+    for (size_t i = 0; i < names.size() && i < kShown; ++i) {
+        s += (i ? ", " : "") + (names[i].empty() ? std::string("\"\"") : names[i]);
+    }
+    if (total > std::min(names.size(), kShown)) {
+        s += s.empty() ? "..." : ", ...";
+    }
+    return s;
+}
+
+void addLine(ValidationReport& rep, Verdict v, const std::string& text)
+{
+    if (int(v) > int(rep.verdict)) {
+        rep.verdict = v;
+    }
+    rep.lines.push_back(std::string(v == Verdict::Pass ? "" : v == Verdict::Warn ? "WARN " : "FAIL ") + text);
+}
 
 double angleDeg(const Vec3& a, const Vec3& b)
 {
@@ -306,6 +328,8 @@ Capabilities intersect(const Capabilities& a, const Capabilities& b)
     c.animations = a.animations && b.animations;
     c.morphs = a.morphs && b.morphs;
     c.lods = a.lods && b.lods;
+    c.meshNames = a.meshNames && b.meshNames;
+    c.poses = a.poses && b.poses;
     return c;
 }
 
@@ -356,6 +380,16 @@ void checkUpAxis(ValidationReport& rep, UpAxis expected, const RawFrame& raw, co
             text = format(tr("gdc.model.warn.upWrong"), axisLabel(*raw.declared, raw.declaredNegative).c_str(), upAxisName(expected));
         }
     }
+    // FBX UnitScaleFactor and COLLADA meter. The game multiplies the model by this and does not
+    // convert FBX centimeters into meters, so only 1 keeps the original size.
+    if (raw.gameScale) {
+        j["unitScale"] = *raw.gameScale;
+        if (std::abs(*raw.gameScale - 1.0) > 1e-4) {
+            v = Verdict::Fail;
+            text += " ";
+            text += format(tr("gdc.model.warn.unitScale"), *raw.gameScale);
+        }
+    }
     if (raw.hasGeometry && !source.tris.empty()) {
         const ts::Vec3 lo = source.bounds.min, hi = source.bounds.max;
         ts::Vec3 wantMin = lo, wantMax = hi;
@@ -386,6 +420,10 @@ void checkUpAxis(ValidationReport& rep, UpAxis expected, const RawFrame& raw, co
         } else {
             text += " ";
             text += tr("gdc.model.warn.upSizeOk");
+            if (raw.gameScale && std::abs(*raw.gameScale - 1.0) <= 1e-4) {
+                text += " ";
+                text += tr("gdc.model.warn.unitOk");
+            }
         }
     }
     line(v, text);
@@ -394,19 +432,6 @@ void checkUpAxis(ValidationReport& rep, UpAxis expected, const RawFrame& raw, co
 }
 
 namespace {
-
-bool lodAnchor(const aiNode* node)
-{
-    if (!node) {
-        return false;
-    }
-    for (unsigned i = 0; i < node->mNumChildren; ++i) {
-        if (isBaseStart(node->mChildren[i])) {
-            return true;
-        }
-    }
-    return false;
-}
 
 bool treeHasLodAnchor(const aiNode* node)
 {
@@ -422,19 +447,6 @@ bool treeHasLodAnchor(const aiNode* node)
         }
     }
     return false;
-}
-
-void collectMeshNodes(const aiNode* node, std::set<std::string>& out)
-{
-    if (!node) {
-        return;
-    }
-    if (node->mNumMeshes) {
-        out.insert(toLower(node->mName.C_Str()));
-    }
-    for (unsigned i = 0; i < node->mNumChildren; ++i) {
-        collectMeshNodes(node->mChildren[i], out);
-    }
 }
 
 } // namespace
@@ -469,66 +481,21 @@ void checkGameLod(ValidationReport& report, const aiScene& written, const aiScen
     } else {
         report.lines.push_back(tr("gdc.model.warn.lodOk"));
     }
-
-    std::set<std::string> want, got;
-    collectMeshNodes(source.mRootNode, want);
-    collectMeshNodes(written.mRootNode, got);
-    std::vector<std::string> missing;
-    for (const std::string& name : want) {
-        if (!got.count(name) && missing.size() < 4) {
-            missing.push_back(name);
-        }
-    }
-    const size_t missingCount = want.size() - std::count_if(want.begin(), want.end(), [&](const std::string& n) { return got.count(n) != 0; });
-    report.json["lod"]["meshNodes"] = want.size();
-    report.json["lod"]["meshNodesFound"] = want.size() - missingCount;
-    if (missingCount) {
-        raise(Verdict::Fail);
-        std::string listed;
-        for (size_t i = 0; i < missing.size(); ++i) {
-            if (i) {
-                listed += ", ";
-            }
-            listed += missing[i];
-        }
-        if (missingCount > missing.size()) {
-            if (!listed.empty()) {
-                listed += ", ";
-            }
-            listed += "...";
-        }
-        report.lines.push_back(std::string("FAIL ") + format(tr("gdc.model.warn.lodNames"), missingCount, listed.c_str()));
-    }
     report.json["verdict"] = verdictName(report.verdict);
 }
 
 void checkStoredNames(ValidationReport& report, const std::vector<std::pair<std::string, std::string>>& restored,
                       const aiScene& written)
 {
-    auto raise = [&](Verdict v) {
-        if (int(v) > int(report.verdict)) {
-            report.verdict = v;
-        }
-    };
-    auto joinFirst = [](const std::vector<std::string>& items, size_t total) {
-        std::string s;
-        for (size_t i = 0; i < items.size(); ++i) {
-            s += (i ? ", " : "") + items[i];
-        }
-        return total > items.size() ? s + ", ..." : s;
-    };
-
     // Load puts back the real name from the file's extras; the game and Blender ignore those and see the stored one.
     if (restored.empty()) {
         report.lines.push_back(tr("gdc.model.warn.namesStoredOk"));
     } else {
-        raise(Verdict::Fail);
         std::vector<std::string> shown;
-        for (size_t i = 0; i < restored.size() && i < 4; ++i) {
+        for (size_t i = 0; i < restored.size() && i < kShown; ++i) {
             shown.push_back(format("%s -> %s", restored[i].first.c_str(), restored[i].second.c_str()));
         }
-        report.lines.push_back(std::string("FAIL ") +
-                               format(tr("gdc.model.warn.namesStored"), restored.size(), joinFirst(shown, restored.size()).c_str()));
+        addLine(report, Verdict::Fail, format(tr("gdc.model.warn.namesStored"), restored.size(), listNames(shown, restored.size()).c_str()));
     }
     report.json["storedNames"] = {{"renamed", restored.size()}};
 
@@ -545,36 +512,21 @@ void checkStoredNames(ValidationReport& report, const std::vector<std::pair<std:
     for (const auto& [name, count] : uses) {
         if (count > 1) {
             ++repeatedCount;
-            if (repeated.size() < 4) {
-                repeated.push_back(name);
-            }
+            repeated.push_back(name);
         }
     }
     report.json["storedNames"]["duplicateMaterials"] = repeatedCount;
     if (repeatedCount) {
-        raise(Verdict::Warn);
-        report.lines.push_back(std::string("WARN ") +
-                               format(tr("gdc.model.warn.matRepeated"), repeatedCount, joinFirst(repeated, repeatedCount).c_str()));
+        addLine(report, Verdict::Warn, format(tr("gdc.model.warn.matRepeated"), repeatedCount, listNames(repeated, repeatedCount).c_str()));
     }
     report.json["verdict"] = verdictName(report.verdict);
 }
 
 void checkImportNames(ValidationReport& report, const aiScene& written, bool gltf)
 {
-    auto joinFirst = [](const std::vector<std::string>& items, size_t total) {
-        std::string s;
-        for (size_t i = 0; i < items.size(); ++i) {
-            s += (i ? ", " : "") + items[i];
-        }
-        return total > items.size() ? s + ", ..." : s;
-    };
     auto warn = [&](const char* id, size_t count, const std::vector<std::string>& names) {
-        if (int(Verdict::Warn) > int(report.verdict)) {
-            report.verdict = Verdict::Warn;
-        }
-        report.lines.push_back(std::string("WARN ") + format(tr(id), count, joinFirst(names, count).c_str()));
+        addLine(report, Verdict::Warn, format(tr(id), count, listNames(names, count).c_str()));
     };
-    constexpr size_t kShown = 4;
     size_t problems = 0;
 
     // Blender's glTF importer builds one material per vertex-color use ("name" and "name.001") when a material is
@@ -659,7 +611,285 @@ void checkImportNames(ValidationReport& report, const aiScene& written, bool glt
     report.json["verdict"] = verdictName(report.verdict);
 }
 
-ValidationReport compareSummaries(const Summary& src, const Summary& dst, const Capabilities& caps, const Tolerance& tol)
+namespace {
+
+// Nodes by lowercase name (first of a repeated name).
+using NodeMap = std::map<std::string, const NodePose*>;
+
+NodeMap nodeMap(const Summary& s)
+{
+    NodeMap m;
+    for (const NodePose& n : s.nodes) {
+        m.emplace(toLower(n.name), &n);
+    }
+    return m;
+}
+
+// Nearest ancestor (or the node itself with `self`) whose name is in `common`; "" when there is none.
+std::string commonAncestor(const NodeMap& all, std::string name, const std::set<std::string>& common, bool self)
+{
+    if (!self) {
+        auto it = all.find(name);
+        name = it != all.end() ? toLower(it->second->parent) : std::string();
+    }
+    for (size_t guard = 0; !name.empty() && guard <= all.size(); ++guard) {
+        if (common.count(name)) {
+            return name;
+        }
+        auto it = all.find(name);
+        name = it != all.end() ? toLower(it->second->parent) : std::string();
+    }
+    return {};
+}
+
+std::set<int> usedObjects(const Summary& s)
+{
+    std::set<int> used;
+    for (const Tri& t : s.tris) {
+        if (t.object >= 0 && t.object < int(s.objects.size())) {
+            used.insert(t.object);
+        }
+    }
+    return used;
+}
+
+std::set<std::string> usedMaterials(const Summary& s)
+{
+    std::set<std::string> used;
+    for (const Tri& t : s.tris) {
+        if (t.material >= 0 && t.material < int(s.materials.size())) {
+            used.insert(s.materials[t.material]);
+        }
+    }
+    return used;
+}
+
+// Placeholder materials the converter or an importer gives triangles that had none.
+bool placeholderMaterial(const std::string& name) { return name == "NoMaterial" || name == "DefaultMaterial"; }
+
+// Node tree, node poses, mesh names, detail levels and material names against the source.
+void checkStructure(ValidationReport& rep, const Summary& src, const Summary& dst, const Capabilities& caps, const Tolerance& tol,
+                    const StructureHints& hints, double diag)
+{
+    nlohmann::json& js = rep.json["structure"];
+
+    std::vector<std::string> renamed;
+    for (const Summary* s : {&src, &dst}) {
+        for (const auto& [from, to] : s->renamed) {
+            renamed.push_back(from + " -> " + to);
+        }
+    }
+    if (!renamed.empty()) {
+        addLine(rep, Verdict::Pass, format(tr("gdc.model.warn.renamed"), renamed.size(), listNames(renamed, renamed.size()).c_str()));
+    }
+    js["renamed"] = renamed.size();
+
+    // --- nodes, tree, pose ---
+    const NodeMap allA = nodeMap(src), allB = nodeMap(dst);
+    std::set<std::string> inserted, dropped;
+    for (const std::string& n : hints.inserted) {
+        inserted.insert(toLower(n));
+    }
+    for (const std::string& n : hints.dropped) {
+        dropped.insert(toLower(n));
+    }
+    std::set<std::string> common;
+    std::vector<std::string> missing, extra;
+    for (const auto& [name, n] : allA) {
+        if (allB.count(name)) {
+            common.insert(name);
+        } else if (!dropped.count(name)) {
+            missing.push_back(n->name);
+        }
+    }
+    for (const auto& [name, n] : allB) {
+        if (!allA.count(name) && !inserted.count(name)) {
+            extra.push_back(n->name);
+        }
+    }
+    if (caps.hierarchy) {
+        std::vector<std::string> reparented, moved;
+        double maxRot = 0, maxTrans = 0;
+        for (const std::string& name : common) {
+            const NodePose* a = allA.at(name);
+            const NodePose* b = allB.at(name);
+            const std::string pa = commonAncestor(allA, name, common, false), pb = commonAncestor(allB, name, common, false);
+            if (pa != pb) {
+                reparented.push_back(format("%s (%s -> %s)", a->name.c_str(), pa.empty() ? "-" : pa.c_str(), pb.empty() ? "-" : pb.c_str()));
+            }
+            // Mesh holders are placed by their geometry, which the triangle match checks.
+            if (!caps.poses || a->meshHolder || b->meshHolder) {
+                continue;
+            }
+            const double trans = length(translationOf(a->world) - translationOf(b->world));
+            const double rot = a->mirrored || b->mirrored ? 0.0 : rotDiffDeg(a->world, b->world);
+            maxRot = std::max(maxRot, rot);
+            maxTrans = std::max(maxTrans, trans);
+            if (rot > tol.rotDeg || trans > tol.transRel * diag) {
+                moved.push_back(a->name);
+            }
+        }
+        js["nodes"] = allA.size();
+        js["nodesMissing"] = missing.size();
+        js["nodesExtra"] = extra.size();
+        js["tree"] = {{"compared", common.size()}, {"reparented", reparented.size()}};
+        if (caps.poses) {
+            js["pose"] = {{"moved", moved.size()}, {"maxRotDeg", maxRot}, {"maxTrans", maxTrans}};
+        }
+        if (!missing.empty()) {
+            addLine(rep, Verdict::Fail, format(tr("gdc.model.warn.namesParts"), allA.size() - missing.size(), allA.size(),
+                                               listNames(missing, missing.size()).c_str()));
+        }
+        if (!extra.empty()) {
+            addLine(rep, Verdict::Fail, format(tr("gdc.model.warn.nodesExtra"), extra.size(), listNames(extra, extra.size()).c_str()));
+        }
+        if (!reparented.empty()) {
+            addLine(rep, Verdict::Fail,
+                    format(tr("gdc.model.warn.treeParent"), reparented.size(), listNames(reparented, reparented.size()).c_str()));
+        }
+        if (!moved.empty()) {
+            addLine(rep, Verdict::Fail,
+                    format(tr("gdc.model.warn.poseMoved"), moved.size(), listNames(moved, moved.size()).c_str(), maxRot, maxTrans));
+        }
+        if (!common.empty() && missing.empty() && extra.empty() && reparented.empty() && moved.empty()) {
+            addLine(rep, Verdict::Pass, format(tr("gdc.model.warn.treeOk"), common.size()));
+        }
+    }
+
+    // --- mesh names ---
+    if (!caps.meshNames) {
+        if (!src.objects.empty()) {
+            addLine(rep, Verdict::Pass, tr("gdc.model.warn.meshNamesNone"));
+        }
+    } else if (src.tsObjects == dst.tsObjects) {
+        std::map<std::string, const ObjectInfo*> objA, objB;
+        for (int i : usedObjects(src)) {
+            objA.emplace(toLower(src.objects[i].name), &src.objects[i]);
+        }
+        for (int i : usedObjects(dst)) {
+            objB.emplace(toLower(dst.objects[i].name), &dst.objects[i]);
+        }
+        std::vector<std::string> lost, added, owners;
+        for (const auto& [name, o] : objA) {
+            auto it = objB.find(name);
+            if (it == objB.end()) {
+                lost.push_back(o->name);
+                continue;
+            }
+            if (!caps.hierarchy || o->node.empty() || it->second->node.empty()) {
+                continue;
+            }
+            const std::string na = commonAncestor(allA, toLower(o->node), common, true);
+            const std::string nb = commonAncestor(allB, toLower(it->second->node), common, true);
+            if (na != nb) {
+                owners.push_back(format("%s (%s -> %s)", o->name.c_str(), na.empty() ? "-" : na.c_str(), nb.empty() ? "-" : nb.c_str()));
+            }
+        }
+        for (const auto& [name, o] : objB) {
+            if (!objA.count(name)) {
+                added.push_back(o->name);
+            }
+        }
+        js["meshNames"] = {{"meshes", objA.size()}, {"lost", lost.size()}, {"extra", added.size()}, {"otherNode", owners.size()}};
+        if (!lost.empty()) {
+            addLine(rep, Verdict::Fail, format(tr("gdc.model.warn.meshNamesLost"), lost.size(), objA.size(), listNames(lost, lost.size()).c_str()));
+        }
+        if (!added.empty()) {
+            addLine(rep, Verdict::Fail, format(tr("gdc.model.warn.meshNamesExtra"), added.size(), listNames(added, added.size()).c_str()));
+        }
+        if (!owners.empty()) {
+            addLine(rep, Verdict::Fail, format(tr("gdc.model.warn.meshOwner"), owners.size(), listNames(owners, owners.size()).c_str()));
+        }
+        if (lost.empty() && added.empty() && owners.empty()) {
+            addLine(rep, Verdict::Pass, format(tr("gdc.model.warn.meshNamesOk"), objA.size()));
+        }
+    }
+
+    // --- detail levels ---
+    if (caps.lods && !hints.singleDetail && !src.details.empty()) {
+        std::multiset<int> sa, sb;
+        for (const auto& d : src.details) {
+            sa.insert(int(std::lround(d.second)));
+        }
+        for (const auto& d : dst.details) {
+            sb.insert(int(std::lround(d.second)));
+        }
+        auto sizes = [](const std::multiset<int>& s) {
+            std::string out;
+            for (int v : s) {
+                out += (out.empty() ? "" : " ") + std::to_string(v);
+            }
+            return out;
+        };
+        std::vector<std::string> renamedDetails;
+        const bool named = src.tsObjects && dst.tsObjects && !src.details.front().first.empty() && !dst.details.empty() &&
+                           !dst.details.front().first.empty();
+        if (named && src.details.size() == dst.details.size()) {
+            for (size_t i = 0; i < src.details.size(); ++i) {
+                if (toLower(src.details[i].first) != toLower(dst.details[i].first)) {
+                    renamedDetails.push_back(src.details[i].first + " -> " + dst.details[i].first);
+                }
+            }
+        }
+        js["detailSizes"] = sizes(sa);
+        js["resultDetailSizes"] = sizes(sb);
+        if (sa != sb) {
+            addLine(rep, Verdict::Fail, format(tr("gdc.model.warn.detailSizes"), sizes(sb).c_str(), sizes(sa).c_str()));
+        } else if (!renamedDetails.empty()) {
+            addLine(rep, Verdict::Fail, format(tr("gdc.model.warn.detailNames"), renamedDetails.size(),
+                                               listNames(renamedDetails, renamedDetails.size()).c_str()));
+        } else {
+            addLine(rep, Verdict::Pass, format(tr("gdc.model.warn.detailsOk"), src.details.size()));
+        }
+    }
+
+    // --- material names ---
+    if (caps.materials) {
+        const std::set<std::string> usedA = usedMaterials(src), usedB = usedMaterials(dst);
+        const bool untextured = std::any_of(src.tris.begin(), src.tris.end(), [&](const Tri& t) {
+            return t.material < 0 || t.material >= int(src.materials.size()) || src.materials[t.material].empty();
+        });
+        std::vector<std::string> lost, added, unused;
+        for (const std::string& m : usedA) {
+            if (!usedB.count(m)) {
+                lost.push_back(m);
+            }
+        }
+        for (const std::string& m : usedB) {
+            if (!usedA.count(m) && !(untextured && placeholderMaterial(m))) {
+                added.push_back(m);
+            }
+        }
+        const std::set<std::string> dstAll(dst.materials.begin(), dst.materials.end());
+        for (const std::string& m : std::set<std::string>(src.materials.begin(), src.materials.end())) {
+            if (!usedA.count(m) && !dstAll.count(m) && !m.empty()) {
+                unused.push_back(m);
+            }
+        }
+        js["materials"] = usedA.size();
+        js["materialsMissing"] = lost.size();
+        js["materialsExtra"] = added.size();
+        js["materialsUnusedDropped"] = unused.size();
+        if (!lost.empty()) {
+            addLine(rep, Verdict::Fail, format(tr("gdc.model.warn.namesMats"), usedA.size() - lost.size(), usedA.size(),
+                                               listNames(lost, lost.size()).c_str()));
+        }
+        if (!added.empty()) {
+            addLine(rep, Verdict::Fail, format(tr("gdc.model.warn.matsExtra"), added.size(), listNames(added, added.size()).c_str()));
+        }
+        if (lost.empty() && added.empty()) {
+            addLine(rep, Verdict::Pass, format(tr("gdc.model.warn.matsOk"), usedA.size()));
+        }
+        if (!unused.empty()) {
+            addLine(rep, Verdict::Pass, format(tr("gdc.model.warn.matsUnused"), unused.size(), listNames(unused, unused.size()).c_str()));
+        }
+    }
+}
+
+} // namespace
+
+ValidationReport compareSummaries(const Summary& src, const Summary& dst, const Capabilities& caps, const Tolerance& tol,
+                                  const StructureHints& hints)
 {
     ValidationReport rep;
     nlohmann::json& j = rep.json;
@@ -678,82 +908,10 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
 
     // --- structure ---
     {
-        std::set<std::string> dstNodes;
-        for (const NodePose& n : dst.nodes) {
-            dstNodes.insert(toLower(n.name));
-        }
-        for (const std::string& n : dst.meshHolders) {
-            dstNodes.insert(toLower(n));
-        }
-        size_t found = 0;
-        for (const NodePose& n : src.nodes) {
-            found += dstNodes.count(toLower(n.name));
-        }
-        std::set<std::string> dstMats(dst.materials.begin(), dst.materials.end());
-        std::set<std::string> usedSrcMats;
-        for (const Tri& t : src.tris) {
-            if (t.material >= 0 && t.material < int(src.materials.size())) {
-                usedSrcMats.insert(src.materials[t.material]);
-            }
-        }
-        size_t matsFound = 0;
-        for (const std::string& m : usedSrcMats) {
-            matsFound += dstMats.count(m);
-        }
-        j["structure"] = {{"nodes", src.nodes.size()},           {"nodesFound", found},
-                          {"materials", usedSrcMats.size()},     {"materialsFound", matsFound},
-                          {"details", src.details.size()},       {"resultDetails", dst.details.size()},
-                          {"skinnedMeshes", src.skinnedMeshes},  {"resultSkinnedMeshes", dst.skinnedMeshes},
-                          {"animations", src.anims.size()},      {"resultAnimations", dst.anims.size()}};
-        auto joinNames = [](const std::vector<std::string>& names, bool more) {
-            std::string s;
-            for (size_t i = 0; i < names.size(); ++i) {
-                if (i) {
-                    s += ", ";
-                }
-                s += names[i];
-            }
-            if (more) {
-                if (!s.empty()) {
-                    s += ", ";
-                }
-                s += "...";
-            }
-            return s;
-        };
-        const bool nodesMissing = caps.hierarchy && found < src.nodes.size();
-        const bool matsMissing = caps.materials && matsFound < usedSrcMats.size();
-        const bool detailsDiffer = caps.lods && !src.details.empty() && src.details.size() != dst.details.size();
-        if (!nodesMissing && !matsMissing && !detailsDiffer) {
-            if (caps.lods && !src.details.empty()) {
-                line(Verdict::Pass, format(tr("gdc.model.warn.namesOkDetails"), src.nodes.size(), usedSrcMats.size(), src.details.size()));
-            } else {
-                line(Verdict::Pass, format(tr("gdc.model.warn.namesOk"), src.nodes.size(), usedSrcMats.size()));
-            }
-        }
-        if (nodesMissing) {
-            std::vector<std::string> missing;
-            for (const NodePose& n : src.nodes) {
-                if (!dstNodes.count(toLower(n.name)) && missing.size() < 4) {
-                    missing.push_back(n.name);
-                }
-            }
-            line(Verdict::Warn, format(tr("gdc.model.warn.namesParts"), found, src.nodes.size(),
-                                       joinNames(missing, found + missing.size() < src.nodes.size()).c_str()));
-        }
-        if (matsMissing) {
-            std::vector<std::string> missing;
-            for (const std::string& m : usedSrcMats) {
-                if (!dstMats.count(m) && missing.size() < 4) {
-                    missing.push_back(m);
-                }
-            }
-            line(Verdict::Warn, format(tr("gdc.model.warn.namesMats"), matsFound, usedSrcMats.size(),
-                                       joinNames(missing, matsFound + missing.size() < usedSrcMats.size()).c_str()));
-        }
-        if (detailsDiffer) {
-            line(Verdict::Warn, format(tr("gdc.model.warn.namesDetails"), dst.details.size(), src.details.size()));
-        }
+        j["structure"] = {{"details", src.details.size()},      {"resultDetails", dst.details.size()},
+                          {"skinnedMeshes", src.skinnedMeshes}, {"resultSkinnedMeshes", dst.skinnedMeshes},
+                          {"animations", src.anims.size()},     {"resultAnimations", dst.anims.size()}};
+        checkStructure(rep, src, dst, caps, tol, hints, diag);
         if (caps.skins && src.skinnedMeshes > 0 && dst.skinnedMeshes == 0) {
             line(Verdict::Fail, format(tr("gdc.model.warn.skinRigid"), src.skinnedMeshes));
         }
@@ -771,6 +929,20 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
     if (dst.degenerate > src.degenerate) {
         line(Verdict::Warn, format(tr("gdc.model.warn.flat"), dst.degenerate - src.degenerate));
     }
+
+    const bool objectsComparable = caps.meshNames && src.tsObjects == dst.tsObjects;
+    // Object names as shared ids, so the triangle match compares integers.
+    std::map<std::string, int> objectIds;
+    auto idsOf = [&](const Summary& s) {
+        std::vector<int> ids;
+        for (const ObjectInfo& o : s.objects) {
+            ids.push_back(objectIds.emplace(toLower(o.name), int(objectIds.size())).first->second);
+        }
+        return ids;
+    };
+    const std::vector<int> idsA = idsOf(src), idsB = idsOf(dst);
+    auto objA = [&](const Tri* t) { return t->object >= 0 && t->object < int(idsA.size()) ? idsA[size_t(t->object)] : -1; };
+    auto objB = [&](const Tri* t) { return t->object >= 0 && t->object < int(idsB.size()) ? idsB[size_t(t->object)] : -1; };
 
     // --- per group geometry and attributes ---
     std::map<int, std::pair<std::vector<const Tri*>, std::vector<const Tri*>>> groups;
@@ -814,6 +986,10 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
             const std::string* mb = b->material >= 0 && b->material < int(dst.materials.size()) ? &dst.materials[b->material] : nullptr;
             if (ma && mb && *ma != *mb) {
                 c += 4.0;
+            }
+            // LODs and decals put identical triangles in different meshes; prefer the one in the same mesh.
+            if (objectsComparable && objA(a) != objB(b)) {
+                c += 8.0;
             }
             for (int i = 0; i < 3; ++i) {
                 const Corner& x = a->c[i];
@@ -1052,8 +1228,44 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
                 changed += a != b && !a.empty();
             }
             g["materialChanged"] = changed;
-            line(changed ? Verdict::Warn : Verdict::Pass,
+            line(changed ? Verdict::Fail : Verdict::Pass,
                  format(tr(changed ? "gdc.model.warn.materialChanged" : "gdc.model.warn.materialOk"), tag.c_str(), changed));
+
+            // Triangles per material, below-tolerance slivers left out (encoders may drop them).
+            std::map<std::string, std::pair<size_t, size_t>> counts;
+            for (const Tri* t : A) {
+                if (!isDegenerate(t, posTol * 4.0)) {
+                    ++counts[t->material >= 0 && t->material < int(src.materials.size()) ? src.materials[t->material] : ""].first;
+                }
+            }
+            for (const Tri* t : B) {
+                if (!isDegenerate(t, posTol * 4.0)) {
+                    ++counts[t->material >= 0 && t->material < int(dst.materials.size()) ? dst.materials[t->material] : ""].second;
+                }
+            }
+            std::vector<std::string> differ;
+            nlohmann::json jc = nlohmann::json::object();
+            for (const auto& [name, n] : counts) {
+                jc[name] = {n.first, n.second};
+                if (n.first != n.second && !(placeholderMaterial(name) && !n.first) && !(name.empty() && !n.second)) {
+                    differ.push_back(format("%s %zu -> %zu", name.empty() ? "-" : name.c_str(), n.first, n.second));
+                }
+            }
+            g["materialCounts"] = jc;
+            if (!differ.empty()) {
+                line(Verdict::Fail, format(tr("gdc.model.warn.matCounts"), tag.c_str(), differ.size(), listNames(differ, differ.size()).c_str()));
+            }
+        }
+
+        if (objectsComparable) {
+            size_t changed = 0;
+            for (const Pair& p : match.pairs) {
+                const int a = objA(p.a), b = objB(p.b);
+                changed += a >= 0 && b >= 0 && a != b;
+            }
+            g["objectChanged"] = changed;
+            line(changed ? Verdict::Fail : Verdict::Pass,
+                 format(tr(changed ? "gdc.model.warn.objectChanged" : "gdc.model.warn.objectOk"), tag.c_str(), changed));
         }
 
         if (caps.skins && src.skinnedMeshes && dst.skinnedMeshes) {

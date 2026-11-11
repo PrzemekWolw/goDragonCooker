@@ -288,6 +288,15 @@ if(GDC_BUILD_TESTS)
         --convert glb,glb-draco,dae,cdae,dts
         --out "${CMAKE_CURRENT_BINARY_DIR}/selftest-model"
         --back "${GDC_TEST_MODEL}")
+    set(GDC_TEST_HIERARCHY "${CMAKE_CURRENT_SOURCE_DIR}/app/tests/data/hierarchy.dae")
+    add_test(NAME gdc_model_hierarchy COMMAND gdc_model_test
+        --convert glb,dae,fbx,obj,x,cdae,dts
+        --out "${CMAKE_CURRENT_BINARY_DIR}/selftest-hierarchy"
+        --back "${GDC_TEST_HIERARCHY}")
+    add_test(NAME gdc_model_structure COMMAND gdc_model_test
+        --corrupt-structure --out "${CMAKE_CURRENT_BINARY_DIR}" "${GDC_TEST_HIERARCHY}")
+    add_test(NAME gdc_model_caps COMMAND gdc_model_test
+        --caps --out "${CMAKE_CURRENT_BINARY_DIR}/selftest-caps" "${GDC_TEST_HIERARCHY}")
     add_test(NAME gdc_cook_test COMMAND gdc_cook_test
         --work "${CMAKE_CURRENT_BINARY_DIR}/selftest-cook"
         "color:${GDC_TEST_IMAGE}" "normal:${GDC_TEST_IMAGE}" "dataR:${GDC_TEST_IMAGE}")

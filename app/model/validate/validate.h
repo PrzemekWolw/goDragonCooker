@@ -1,5 +1,6 @@
 #pragma once
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -37,12 +38,20 @@ struct ValidationReport {
     nlohmann::json json;
 };
 
+// Structure changes a writer makes on purpose; anything else that differs from the source fails.
+struct StructureHints {
+    std::set<std::string> inserted; // nodes the writer adds: generated mesh holders and base/start, a promoted root
+    std::set<std::string> dropped;  // source nodes the writer removes: folded LOD wrappers
+    bool singleDetail = false;      // only one detail level is written
+};
+
 // Compares what the target can hold: `caps` is the intersection of source and target capabilities.
-ValidationReport compareSummaries(const Summary& source, const Summary& result, const Capabilities& caps, const Tolerance& tol);
+ValidationReport compareSummaries(const Summary& source, const Summary& result, const Capabilities& caps, const Tolerance& tol,
+                                  const StructureHints& hints = {});
 
 void checkUpAxis(ValidationReport& report, UpAxis expected, const RawFrame& raw, const Summary& source);
 
-// `written` is the scene Assimp produces when it reads the file back.
+// Whether the game finds the detail levels. `written` is the scene Assimp produces when it reads the file back.
 void checkGameLod(ValidationReport& report, const aiScene& written, const aiScene& source, bool hierarchy);
 
 // `restored` is Model::restoredNames() of the re-read file. `written` is the re-read scene.

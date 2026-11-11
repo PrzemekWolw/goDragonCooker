@@ -39,7 +39,11 @@ struct RawFrame {
     std::string error;
     std::optional<UpAxis> declared; // COLLADA <up_axis>, FBX UpAxis; none for formats without the field
     bool declaredNegative = false;  // FBX -Y etc.
-    ts::Box bounds;                 // world-space bounds of the triangles as stored
+    // Factor the game's assimp applies to the stored numbers. FBX UnitScaleFactor (centimeters per unit,
+    // baked into the root; the game does not convert centimeters to meters) and COLLADA <unit meter>.
+    // 1 means one stored unit stays one meter. Absent when the format has no unit field.
+    std::optional<double> gameScale;
+    ts::Box bounds;                 // world-space bounds of the triangles as stored, times gameScale for FBX
     bool hasGeometry = false;
 };
 RawFrame readRawFrame(const std::string& path);

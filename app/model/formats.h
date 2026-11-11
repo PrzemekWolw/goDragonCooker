@@ -28,7 +28,7 @@ struct SettingDef {
 
 // What survives a write to this format; validation only compares what both sides keep.
 struct Capabilities {
-    bool hierarchy = true;
+    bool hierarchy = true; // the node tree (parents and node transforms)
     bool materials = true;
     bool normals = true;
     bool uv = true;
@@ -39,6 +39,8 @@ struct Capabilities {
     bool animations = false;
     bool morphs = false;
     bool lods = false; // detail levels and collision as real TSShape details
+    bool meshNames = true; // the name of every mesh node
+    bool poses = true; // node transforms; false when the writer bakes them into the vertices
 };
 
 struct Format {
@@ -54,6 +56,9 @@ struct Format {
     std::function<std::string(const nlohmann::json&)> exporterId;
     // Output extension for a given settings object.
     std::function<std::string(const nlohmann::json&)> outputExt;
+    // The written mesh node name for a mesh node read back from this format (name, parent node name), when the
+    // writer decorates it.
+    std::function<std::string(const std::string&, const std::string&)> meshNameOf;
 };
 
 const std::vector<Format>& formats();

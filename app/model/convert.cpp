@@ -139,19 +139,6 @@ bool startsWithCi(const char* name, const char* prefix)
     return hasPrefix(toLower(name ? name : ""), prefix);
 }
 
-bool lodAnchor(const aiNode* node)
-{
-    if (!node) {
-        return false;
-    }
-    for (unsigned i = 0; i < node->mNumChildren; ++i) {
-        if (isBaseStart(node->mChildren[i])) {
-            return true;
-        }
-    }
-    return false;
-}
-
 std::set<std::string> referencedNodeNames(const aiScene& scene)
 {
     std::set<std::string> names;
@@ -170,7 +157,7 @@ std::set<std::string> referencedNodeNames(const aiScene& scene)
     return names;
 }
 
-bool collapseLodWrapper(aiNode* parent, const std::set<std::string>& referenced)
+bool collapseLodWrapper(aiNode* parent, const std::set<std::string>& referenced, std::vector<std::string>& folded)
 {
     std::vector<aiNode*> kept;
     bool changed = false;
@@ -183,6 +170,7 @@ bool collapseLodWrapper(aiNode* parent, const std::set<std::string>& referenced)
             kept.push_back(child);
             continue;
         }
+        folded.push_back(child->mName.C_Str());
         const aiMatrix4x4 xf = child->mTransformation;
         const unsigned n = child->mNumChildren;
         aiNode** grand = child->mChildren;
@@ -234,7 +222,7 @@ void anchorGameLod(aiScene& scene, ConvertResult& r)
     }
     const std::set<std::string> referenced = referencedNodeNames(scene);
     int folded = 0;
-    while (!lodAnchor(root) && !isBaseStart(root) && collapseLodWrapper(root, referenced)) {
+    while (!lodAnchor(root) && !isBaseStart(root) && collapseLodWrapper(root, referenced, r.foldedNodes)) {
         ++folded;
     }
     if (folded) {
@@ -596,6 +584,7 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
 
     // Re-read what was written and compare it with what the source holds.
     Summary before, after;
+    StructureHints hints;
     const aiScene* writtenScene = nullptr;
     Model reread;
     const ts::TsToAiOptions exportOpts = tsToAiOptions(target, settings);
@@ -608,6 +597,8 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
             r.validated = true;
             return r;
         }
+        const ts::AiToTsOptions importOpts = aiToTsOptions(target, settings);
+        hints.singleDetail = importOpts.lod == ts::LodMode::SingleDetail;
         if (source.isTs()) {
             DetailFilter f;
             f.perDetail = true;
@@ -615,7 +606,7 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
             after = summarize(written, f);
         } else {
             std::vector<std::string> ignored;
-            before = summarize(*source.scene(exportOpts, ignored));
+            before = summarize(*source.scene(exportOpts, ignored), SceneNames{true, importOpts});
             after = summarize(written, DetailFilter{});
         }
     } else {
@@ -627,16 +618,6 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
             r.validated = true;
             return r;
         }
-        if (source.isTs()) {
-            std::string e2;
-            const ts::Shape* src = source.shape({}, ignored, e2);
-            DetailFilter f;
-            f.allDetails = exportOpts.lodNames;
-            f.collision = exportOpts.includeCollision;
-            before = summarize(*src, f);
-        } else {
-            before = summarize(*scene);
-        }
         writtenScene = reread.scene(exportOpts, ignored);
         if (const std::string bad = badFaceIndex(*writtenScene); !bad.empty()) {
             r.report.verdict = Verdict::Fail;
@@ -644,15 +625,38 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
             r.validated = true;
             return r;
         }
-        after = summarize(*writtenScene);
+        // FBX, COLLADA and 3DS write the scene's own root container as a node.
+        if (scene && scene->mRootNode) {
+            hints.inserted.insert(scene->mRootNode->mName.C_Str());
+        }
+        hints.dropped.insert(r.foldedNodes.begin(), r.foldedNodes.end());
+        // glTF readers make a lone top node the scene root, which every reader treats as a container.
+        if (writtenScene->mRootNode && !writtenScene->mRootNode->mNumMeshes && !isBaseStart(writtenScene->mRootNode)) {
+            hints.dropped.insert(writtenScene->mRootNode->mName.C_Str());
+        }
+        if (source.isTs()) {
+            std::string e2;
+            const ts::Shape* src = source.shape({}, ignored, e2);
+            DetailFilter f;
+            f.allDetails = exportOpts.lodNames;
+            f.collision = exportOpts.includeCollision;
+            before = summarize(*src, f);
+            hints.singleDetail = !exportOpts.lodNames;
+            SceneNames names{true, {}, target.meshNameOf, ts::objectNaming(*scene, {}).collapse};
+            names.options.lod = exportOpts.lodNames ? ts::LodMode::TrailingNumber : ts::LodMode::SingleDetail;
+            after = summarize(*writtenScene, names);
+        } else {
+            before = summarize(*scene);
+            after = summarize(*writtenScene, SceneNames{false, {}, target.meshNameOf});
+        }
     }
     const Capabilities caps = targetCaps(target, settings);
-    r.report = compareSummaries(before, after, caps, toleranceFor(target, settings));
+    r.report = compareSummaries(before, after, caps, toleranceFor(target, settings), hints);
     if (!target.isTs) {
         checkUpAxis(r.report, writerFrame(target.id).up, readRawFrame(outputPath), before);
         if (writtenScene && scene) {
             checkGameLod(r.report, *writtenScene, *scene, caps.hierarchy);
-            if (caps.hierarchy) {
+            if (caps.meshNames) {
                 checkStoredNames(r.report, reread.restoredNames(), *writtenScene);
                 checkImportNames(r.report, *writtenScene, target.id == "gltf2" || target.id == "gltf1");
             }

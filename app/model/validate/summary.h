@@ -1,9 +1,11 @@
 #pragma once
 
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "model/assimp/ai_bridge.h"
 #include "model/ts/ts_shape.h"
 
 struct aiNode;
@@ -26,6 +28,7 @@ struct Corner {
 struct Tri {
     Corner c[3];
     int material = -1; // index into Summary::materials
+    int object = -1;   // index into Summary::objects
     int group = 0;     // detail size when summarizing per detail
 };
 
@@ -34,9 +37,18 @@ struct Influence {
     float weight = 0;
 };
 
+// Nodes and Assimp mesh holders (mesh-only leaves) in one list; the TS builder makes both shape nodes.
 struct NodePose {
     std::string name;
-    ts::Mat4 world; // scale-free (rigid) part
+    std::string parent; // nearest ancestor in Summary::nodes, empty for a top-level node
+    ts::Mat4 world;     // scale-free (rigid) part
+    bool meshHolder = false;
+    bool mirrored = false; // negative determinant; the TS builder splits the mirror off the rotation
+};
+
+struct ObjectInfo {
+    std::string name;
+    std::string node; // owning node, empty for skins
 };
 
 struct AnimSample {
@@ -49,9 +61,10 @@ struct AnimSample {
 
 struct Summary {
     std::vector<NodePose> nodes;
-    std::vector<std::string> meshHolders; // Assimp mesh-only leaf nodes, kept out of `nodes`
-    std::vector<std::string> objects;
-    std::vector<std::pair<std::string, float>> details;
+    std::vector<ObjectInfo> objects;
+    std::vector<std::pair<std::string, float>> details; // Assimp: trailing-number sizes, no names
+    bool tsObjects = false; // objects carry TS object names (TS shape, or a scene read the way the TS builder reads it)
+    std::vector<std::pair<std::string, std::string>> renamed; // TS uniqueness renames of a repeated name
     std::vector<std::string> materials;
     std::vector<Tri> tris;
     std::vector<std::vector<Influence>> influences;
@@ -74,11 +87,26 @@ struct DetailFilter {
     bool collision = true;    // include negative-size details
 };
 
+// How an Assimp scene's names are read. Raw: mesh node names, as the game's Assimp loader sees them.
+// TS: objects, detail sizes and unique node names as assimpToShape assigns them (for comparing with a TSShape).
+struct SceneNames {
+    bool tsNames = false;
+    ts::AiToTsOptions options;
+    // Format::meshNameOf of the format the scene was read from: a mesh-only leaf whose name decodes to its parent's
+    // name gives its meshes to the parent (3DS writes "<node>_<mesh>_<index>" children).
+    std::function<std::string(const std::string&, const std::string&)> meshNameOf;
+    // Generated nodes of a TS export written to a format that drops the gdc_tsshape metadata.
+    std::vector<std::string> collapse;
+};
+
 Summary summarize(const ts::Shape& shape, const DetailFilter& filter);
-Summary summarize(const aiScene& scene);
+Summary summarize(const aiScene& scene, const SceneNames& names = {});
 
 // A base* node with a start* child: the shape the game reads detail levels from. When it is the scene root it
 // is still a node (the importer keeps it), unlike an empty root.
 bool isBaseStart(const aiNode* node);
+
+// A child of `node` is a base*/start* pair.
+bool lodAnchor(const aiNode* node);
 
 } // namespace model

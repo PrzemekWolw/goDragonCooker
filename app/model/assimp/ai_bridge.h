@@ -1,10 +1,13 @@
 #pragma once
 
 #include <string>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "model/ts/ts_shape.h"
 
+struct aiNode;
 struct aiScene;
 
 // Conversion between Assimp scenes and TSShapes. Coordinates map one to one (the game's Assimp
@@ -49,5 +52,29 @@ constexpr const char* kTsMetadataKey = "gdc_tsshape";
 
 // Parses "name123" / "name-1": returns the base and sets size when a trailing number exists.
 std::string splitTrailingNumber(const std::string& name, int& size);
+
+// The TS object and detail size each mesh node of a scene becomes, as assimpToShape assigns them.
+struct MeshNodeObject {
+    const aiNode* node = nullptr;
+    std::string object; // after the uniqueness suffix
+    int size = 0;
+};
+
+struct ObjectNaming {
+    bool trailing = false; // detail sizes come from trailing numbers
+    std::vector<MeshNodeObject> meshNodes; // pre-order, the bounds node excluded
+    std::vector<std::pair<std::string, std::string>> renamed; // derived name -> unique name (a second mesh at a taken slot)
+    std::vector<std::string> collapse; // generated nodes from gdc_tsshape metadata, not shape nodes
+    const aiNode* boundsNode = nullptr;
+};
+
+ObjectNaming objectNaming(const aiScene& scene, const AiToTsOptions& options);
+
+// TS node and object names are unique (case-insensitive); a repeat gets B, C, ... appended.
+std::string uniqueName(const std::string& base, std::unordered_set<std::string>& taken);
+
+// A node listed in `collapse` that the TS export generated: a mesh-only leaf holder or the base01/start01 wrapper.
+// A shape node may share a holder's name, so the name alone does not decide.
+bool generatedNode(const aiNode& node, const std::unordered_set<std::string>& collapse);
 
 } // namespace ts

@@ -24,6 +24,7 @@ struct ConvertResult {
     std::vector<std::string> log; // settings, sizes and validation lines
     bool validated = false;
     ValidationReport report;
+    std::vector<std::string> foldedNodes; // LOD wrappers folded away before an Assimp export
 };
 
 ConvertResult convertModel(Model& source, const std::string& outputPath, const ConvertOptions& options);

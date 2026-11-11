@@ -54,24 +54,47 @@ Mat4 normalMatrix(const Mat4& m)
     return t;
 }
 
-std::string uniqueName(const std::string& base, std::unordered_set<std::string>& taken)
-{
-    for (int attempt = 0; attempt < 0x10000; ++attempt) {
-        std::string candidate = base;
-        for (int v = attempt; v != 0; v >>= 4) {
-            candidate += char('A' + (v & 0xF));
-        }
-        if (taken.insert(lowerAscii(candidate)).second) {
-            return candidate;
-        }
-    }
-    return base;
-}
-
 bool startsWithI(const std::string& s, const char* prefix)
 {
     const size_t n = std::strlen(prefix);
     return s.size() >= n && lowerAscii(s.substr(0, n)) == lowerAscii(prefix);
+}
+
+std::string withSuffix(const std::string& base, int attempt)
+{
+    std::string candidate = base;
+    for (int v = attempt; v != 0; v >>= 4) {
+        candidate += char('A' + (v & 0xF));
+    }
+    return candidate;
+}
+
+bool isBaseStartNode(const aiNode* node)
+{
+    if (!node || !startsWithI(node->mName.C_Str(), "base")) {
+        return false;
+    }
+    for (unsigned i = 0; i < node->mNumChildren; ++i) {
+        if (startsWithI(node->mChildren[i]->mName.C_Str(), "start")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// base* may be the scene root. glTF keeps a single scene node as the root, so base00 is not a child of anything.
+bool baseStartLayout(const aiScene& scene)
+{
+    const aiNode* root = scene.mRootNode;
+    if (isBaseStartNode(root)) {
+        return true;
+    }
+    for (unsigned i = 0; root && i < root->mNumChildren; ++i) {
+        if (isBaseStartNode(root->mChildren[i])) {
+            return true;
+        }
+    }
+    return false;
 }
 
 struct NodeInfo {
@@ -115,38 +138,12 @@ struct Converter {
     bool haveMeta = false;
     std::map<int, std::string> markerDetailNames; // size -> authored marker name
     std::map<int, std::string> billboardMarkers;
-    std::unordered_set<std::string> collapseNames;                          // generated nodes, not shape nodes
-    std::unordered_map<std::string, std::pair<std::string, int>> meshNodes; // node -> (object, size)
+    std::unordered_set<std::string> collapseNames; // generated nodes, not shape nodes
+    ObjectNaming naming;
 
     void warn(const std::string& w) { warnings.push_back(w); }
 
-    bool isBaseStart(const aiNode* node) const
-    {
-        if (!node || !startsWithI(node->mName.C_Str(), "base")) {
-            return false;
-        }
-        for (unsigned i = 0; i < node->mNumChildren; ++i) {
-            if (startsWithI(node->mChildren[i]->mName.C_Str(), "start")) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // base* may be the scene root. glTF keeps a single scene node as the root, so base00 is not a child of anything.
-    bool hasBaseStartLayout() const
-    {
-        const aiNode* root = scene.mRootNode;
-        if (isBaseStart(root)) {
-            return true;
-        }
-        for (unsigned i = 0; i < root->mNumChildren; ++i) {
-            if (isBaseStart(root->mChildren[i])) {
-                return true;
-            }
-        }
-        return false;
-    }
+    bool isBaseStart(const aiNode* node) const { return isBaseStartNode(node); }
 
     void collectNodes(const aiNode* n, int parent, const Mat4& parentWorld)
     {
@@ -164,35 +161,6 @@ struct Converter {
         }
     }
 
-    // Object name and detail size a mesh node contributes (engine deriveObjectDetail semantics).
-    void objectDetail(const NodeInfo& info, std::string& name, int& size) const
-    {
-        const aiNode* n = info.ai;
-        std::string detailNode = n->mName.C_Str();
-        auto known = meshNodes.find(detailNode);
-        if (known != meshNodes.end()) {
-            name = known->second.first;
-            size = trailing ? known->second.second : opt.singleDetailSize;
-            return;
-        }
-        if (!trailing) {
-            name = detailNode.empty() ? "mesh" : detailNode;
-            size = opt.singleDetailSize;
-            return;
-        }
-        if ((detailNode == "null" || hasSuffix(detailNode, "PIVOT") || hasPrefix(detailNode, "$ColladaAutoName$")) && n->mParent) {
-            detailNode = n->mParent->mName.C_Str();
-        }
-        size = 2;
-        name = splitTrailingNumber(detailNode, size);
-        if (name.empty()) {
-            name = "mesh";
-        }
-        if (size > 0 && (hasPrefix(detailNode, "Collision") || hasPrefix(detailNode, "LOSCol"))) {
-            size = -size;
-        }
-    }
-
     void buildNodes()
     {
         std::unordered_set<std::string> taken;
@@ -200,7 +168,7 @@ struct Converter {
             const aiNode* n = info.ai;
             const bool isRoot = n == scene.mRootNode;
             // A meshless scene root is an importer container, except when it is the base* node itself.
-            if ((isRoot && n->mNumMeshes == 0 && !isBaseStart(n)) || collapseNames.count(n->mName.C_Str())) {
+            if ((isRoot && n->mNumMeshes == 0 && !isBaseStart(n)) || generatedNode(*n, collapseNames)) {
                 continue;
             }
             int parentTs = -1;
@@ -257,30 +225,11 @@ struct Converter {
     void collectObjects()
     {
         std::unordered_map<std::string, int> byName;
-        std::unordered_set<std::string> takenObjectDetails;
-        for (int i = 0; i < int(nodes.size()); ++i) {
+        for (const MeshNodeObject& mn : naming.meshNodes) {
+            const int i = infoOf.at(mn.node);
             const NodeInfo& info = nodes[i];
-            if (!info.ai->mNumMeshes) {
-                continue;
-            }
-            if (boundsNode && info.ai == boundsNode) {
-                continue;
-            }
-            std::string name;
-            int size = 2;
-            objectDetail(info, name, size);
-            // A second mesh at an occupied (name, size) is a different object, not a LOD.
-            std::string unique = name;
-            for (int attempt = 0; attempt < 0x10000; ++attempt) {
-                std::string candidate = name;
-                for (int v = attempt; v != 0; v >>= 4) {
-                    candidate += char('A' + (v & 0xF));
-                }
-                if (takenObjectDetails.insert(lowerAscii(candidate) + '\x1f' + std::to_string(size)).second) {
-                    unique = candidate;
-                    break;
-                }
-            }
+            const std::string& unique = mn.object;
+            const int size = mn.size;
             const std::string key = lowerAscii(unique);
             auto it = byName.find(key);
             if (it == byName.end()) {
@@ -1197,32 +1146,10 @@ struct Converter {
         shape = Shape{};
         shape.exporterVersion = opt.exporterVersion;
         haveMeta = findJsonMeta(scene, kTsMetadataKey, meta) && meta.is_object();
-        trailing = opt.lod == LodMode::TrailingNumber || (opt.lod == LodMode::Auto && hasBaseStartLayout());
-        if (haveMeta) {
-            if (opt.lod == LodMode::Auto && meta.value("lodNames", false)) {
-                trailing = true;
-            }
-            if (meta.contains("collapse") && meta["collapse"].is_array()) {
-                for (const auto& c : meta["collapse"]) {
-                    if (c.is_string()) {
-                        collapseNames.insert(c.get<std::string>());
-                    }
-                }
-            }
-            if (meta.contains("meshNodes") && meta["meshNodes"].is_object()) {
-                for (const auto& [node, v] : meta["meshNodes"].items()) {
-                    if (v.is_array() && v.size() == 2 && v[0].is_string() && v[1].is_number()) {
-                        meshNodes[node] = {v[0].get<std::string>(), v[1].get<int>()};
-                    }
-                }
-            }
-        }
-        for (unsigned i = 0; i < scene.mRootNode->mNumChildren; ++i) {
-            if (lowerAscii(scene.mRootNode->mChildren[i]->mName.C_Str()) == "bounds") {
-                boundsNode = scene.mRootNode->mChildren[i];
-                break;
-            }
-        }
+        naming = objectNaming(scene, opt);
+        trailing = naming.trailing;
+        collapseNames.insert(naming.collapse.begin(), naming.collapse.end());
+        boundsNode = naming.boundsNode;
         collectNodes(scene.mRootNode, -1, Mat4{});
         buildNodes();
         collectMarkers();
@@ -1259,6 +1186,116 @@ std::string splitTrailingNumber(const std::string& name, int& size)
     }
     size = int(value);
     return name.substr(0, p);
+}
+
+std::string uniqueName(const std::string& base, std::unordered_set<std::string>& taken)
+{
+    for (int attempt = 0; attempt < 0x10000; ++attempt) {
+        const std::string candidate = withSuffix(base, attempt);
+        if (taken.insert(lowerAscii(candidate)).second) {
+            return candidate;
+        }
+    }
+    return base;
+}
+
+bool generatedNode(const aiNode& node, const std::unordered_set<std::string>& collapse)
+{
+    if (!collapse.count(node.mName.C_Str())) {
+        return false;
+    }
+    const std::string lower = lowerAscii(node.mName.C_Str());
+    return (node.mNumMeshes && !node.mNumChildren) || lower == "base01" || lower == "start01";
+}
+
+ObjectNaming objectNaming(const aiScene& scene, const AiToTsOptions& opt)
+{
+    ObjectNaming out;
+    if (!scene.mRootNode) {
+        return out;
+    }
+    std::unordered_map<std::string, std::pair<std::string, int>> known; // node -> (object, size)
+    out.trailing = opt.lod == LodMode::TrailingNumber || (opt.lod == LodMode::Auto && baseStartLayout(scene));
+    nlohmann::json meta;
+    if (findJsonMeta(scene, kTsMetadataKey, meta) && meta.is_object()) {
+        if (opt.lod == LodMode::Auto && meta.value("lodNames", false)) {
+            out.trailing = true;
+        }
+        if (meta.contains("collapse") && meta["collapse"].is_array()) {
+            for (const auto& c : meta["collapse"]) {
+                if (c.is_string()) {
+                    out.collapse.push_back(c.get<std::string>());
+                }
+            }
+        }
+        if (meta.contains("meshNodes") && meta["meshNodes"].is_object()) {
+            for (const auto& [node, v] : meta["meshNodes"].items()) {
+                if (v.is_array() && v.size() == 2 && v[0].is_string() && v[1].is_number()) {
+                    known[node] = {v[0].get<std::string>(), v[1].get<int>()};
+                }
+            }
+        }
+    }
+    for (unsigned i = 0; i < scene.mRootNode->mNumChildren; ++i) {
+        if (lowerAscii(scene.mRootNode->mChildren[i]->mName.C_Str()) == "bounds") {
+            out.boundsNode = scene.mRootNode->mChildren[i];
+            break;
+        }
+    }
+
+    // Engine deriveObjectDetail semantics.
+    auto derive = [&](const aiNode* n, std::string& name, int& size) {
+        std::string detailNode = n->mName.C_Str();
+        auto it = known.find(detailNode);
+        if (it != known.end()) {
+            name = it->second.first;
+            size = out.trailing ? it->second.second : opt.singleDetailSize;
+            return;
+        }
+        if (!out.trailing) {
+            name = detailNode.empty() ? "mesh" : detailNode;
+            size = opt.singleDetailSize;
+            return;
+        }
+        if ((detailNode == "null" || hasSuffix(detailNode, "PIVOT") || hasPrefix(detailNode, "$ColladaAutoName$")) && n->mParent) {
+            detailNode = n->mParent->mName.C_Str();
+        }
+        size = 2;
+        name = splitTrailingNumber(detailNode, size);
+        if (name.empty()) {
+            name = "mesh";
+        }
+        if (size > 0 && (hasPrefix(detailNode, "Collision") || hasPrefix(detailNode, "LOSCol"))) {
+            size = -size;
+        }
+    };
+
+    std::unordered_set<std::string> taken;
+    auto walk = [&](auto& self, const aiNode* n) -> void {
+        if (n->mNumMeshes && n != out.boundsNode) {
+            std::string name;
+            int size = 2;
+            derive(n, name, size);
+            // A second mesh at an occupied (name, size) is a different object, not a LOD.
+            std::string unique = name;
+            for (int attempt = 0; attempt < 0x10000; ++attempt) {
+                const std::string candidate = withSuffix(name, attempt);
+                if (taken.insert(lowerAscii(candidate) + '\x1f' + std::to_string(size)).second) {
+                    unique = candidate;
+                    break;
+                }
+            }
+            if (unique != name) {
+                out.renamed.push_back({name, unique});
+            }
+            out.meshNodes.push_back({n, unique, size});
+        }
+        for (unsigned i = 0; i < n->mNumChildren; ++i) {
+            self(self, n->mChildren[i]);
+        }
+    };
+    walk(walk, scene.mRootNode);
+    return out;
 }
 
 bool assimpToShape(const aiScene& scene, const AiToTsOptions& options, Shape& shape, std::vector<std::string>& warnings,
