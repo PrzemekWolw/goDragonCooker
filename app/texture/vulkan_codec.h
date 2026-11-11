@@ -13,6 +13,10 @@ struct CookJob {
     bool inputSRGB = false;
     bool ignoreSRGB = false;
     bool sepa = false;
+    // Set when srcFile is a temporary corrected image. The DDS is written here, named from srcFile.
+    std::string outputDir;
+    // Temporary directory holding srcFile. Removed when the cook finishes.
+    std::string cleanupDir;
 };
 
 std::string vulkanVersion();

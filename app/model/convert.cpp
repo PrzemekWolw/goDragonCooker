@@ -4,12 +4,14 @@
 #include <map>
 #include <set>
 #include <system_error>
+#include <vector>
 
 #include <assimp/Exporter.hpp>
 #include <assimp/SceneCombiner.h>
 #include <assimp/config.h>
 #include <assimp/scene.h>
 
+#include "core/i18n.h"
 #include "core/platform.h"
 #include "core/strings.h"
 #include "model/axis.h"
@@ -79,7 +81,8 @@ aiScene* colladaScene(const aiScene& in)
 }
 
 // The glTF exporters give materials, meshes and nodes one id namespace and rename clashing nodes
-// ("x" -> "x_node"); the original name goes into the node's extras for Model::load to restore.
+// ("x" -> "x_node"). The original name goes into the node's extras; gltfDropEmptyRoot writes it back
+// into the file, and Model::load restores it when reading a file that still has the renamed node.
 aiScene* gltfScene(const aiScene& in)
 {
     aiScene* copy = nullptr;
@@ -107,6 +110,27 @@ aiScene* gltfScene(const aiScene& in)
         }
     };
     walk(walk, copy->mRootNode);
+    // Blender's glTF importer builds a second material, named "name.001", when one material is used on a
+    // primitive that has vertex colors and on one that does not. Give the plain one white colors.
+    std::vector<char> colored(copy->mNumMaterials, 0);
+    std::vector<char> plain(copy->mNumMaterials, 0);
+    for (unsigned i = 0; i < copy->mNumMeshes; ++i) {
+        const aiMesh* m = copy->mMeshes[i];
+        if (m->mMaterialIndex >= copy->mNumMaterials) {
+            continue;
+        }
+        (m->HasVertexColors(0) ? colored : plain)[m->mMaterialIndex] = 1;
+    }
+    for (unsigned i = 0; i < copy->mNumMeshes; ++i) {
+        aiMesh* m = copy->mMeshes[i];
+        if (m->mMaterialIndex >= copy->mNumMaterials || m->HasVertexColors(0)) {
+            continue;
+        }
+        if (colored[m->mMaterialIndex] && plain[m->mMaterialIndex]) {
+            m->mColors[0] = new aiColor4D[m->mNumVertices];
+            std::fill(m->mColors[0], m->mColors[0] + m->mNumVertices, aiColor4D(1, 1, 1, 1));
+        }
+    }
     return copy;
 }
 
@@ -214,7 +238,7 @@ void anchorGameLod(aiScene& scene, ConvertResult& r)
         ++folded;
     }
     if (folded) {
-        r.log.push_back(format("lod: folded %d wrapper node(s) so base/start stays visible", folded));
+        r.log.push_back(format(tr("gdc.model.note.lodFold"), folded));
     }
 }
 
@@ -451,7 +475,7 @@ bool writeAssimp(const aiScene& scene, const Format& target, const nlohmann::jso
         }
         bakeSkins(*owned);
         out = owned.get();
-        r.log.push_back("skins: posed skinned meshes into plain geometry (the format has no skins)");
+        r.warnings.push_back(tr("gdc.model.note.bakedSkin"));
     }
     const WriterFrame frame = writerFrame(target.id);
     if (frame.up == UpAxis::Y) {
@@ -564,7 +588,7 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
     // Assimp has no reader for these outputs (its .stp reader only reads IFC), so there is nothing to compare.
     if (!target.isTs && (!readerForExt(modelExtension(outputPath)) || target.id == "stp")) {
         r.report.verdict = Verdict::Warn;
-        r.report.lines.push_back("WARN not validated: the file cannot be read back to compare");
+        r.report.lines.push_back(std::string("WARN ") + tr("gdc.model.warn.notChecked"));
         r.report.json["verdict"] = verdictName(r.report.verdict);
         r.validated = true;
         return r;
@@ -580,7 +604,7 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
         std::string err;
         if (!ts::readShapeFile(outputPath, written, err)) {
             r.report.verdict = Verdict::Fail;
-            r.report.lines.push_back("FAIL re-read: " + err);
+            r.report.lines.push_back(std::string("FAIL ") + format(tr("gdc.model.warn.reread"), err.c_str()));
             r.validated = true;
             return r;
         }
@@ -599,7 +623,7 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
         std::vector<std::string> ignored;
         if (!reread.load(outputPath, err, ignored)) {
             r.report.verdict = Verdict::Fail;
-            r.report.lines.push_back("FAIL re-read: " + err);
+            r.report.lines.push_back(std::string("FAIL ") + format(tr("gdc.model.warn.reread"), err.c_str()));
             r.validated = true;
             return r;
         }
@@ -616,7 +640,7 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
         writtenScene = reread.scene(exportOpts, ignored);
         if (const std::string bad = badFaceIndex(*writtenScene); !bad.empty()) {
             r.report.verdict = Verdict::Fail;
-            r.report.lines.push_back("FAIL re-read: " + bad);
+            r.report.lines.push_back(std::string("FAIL ") + format(tr("gdc.model.warn.reread"), bad.c_str()));
             r.validated = true;
             return r;
         }
@@ -628,6 +652,10 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
         checkUpAxis(r.report, writerFrame(target.id).up, readRawFrame(outputPath), before);
         if (writtenScene && scene) {
             checkGameLod(r.report, *writtenScene, *scene, caps.hierarchy);
+            if (caps.hierarchy) {
+                checkStoredNames(r.report, reread.restoredNames(), *writtenScene);
+                checkImportNames(r.report, *writtenScene, target.id == "gltf2" || target.id == "gltf1");
+            }
         }
     }
     r.validated = true;

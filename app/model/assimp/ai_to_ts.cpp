@@ -10,6 +10,7 @@
 
 #include <assimp/scene.h>
 
+#include "core/i18n.h"
 #include "core/strings.h"
 #include "model/assimp/ai_bridge.h"
 #include "model/assimp/ai_meta.h"
@@ -433,9 +434,9 @@ struct Converter {
         }
         if (morphTargets < 0 || skin) {
             if (morphTargets > 0 && skin) {
-                warn(format("%s: morph targets on a skinned mesh are not supported by TSShape; dropped", ob.name.c_str()));
+                warn(format(tr("gdc.model.note.morphSkin"), ob.name.c_str()));
             } else if (morphTargets == -2) {
-                warn(format("%s: submeshes have different morph target counts; morphs dropped", ob.name.c_str()));
+                warn(format(tr("gdc.model.note.morphCount"), ob.name.c_str()));
             }
             morphTargets = 0;
         }
@@ -457,7 +458,9 @@ struct Converter {
             const aiMesh* am = scene.mMeshes[n->mMeshes[k]];
             if (!(am->mPrimitiveTypes & (aiPrimitiveType_TRIANGLE | aiPrimitiveType_POLYGON))) {
                 if (am->mNumFaces) {
-                    warn(format("%s: point/line mesh '%s' skipped (TSShape draws triangles only)", ob.name.c_str(), am->mName.C_Str()));
+                    const char* meshName = am->mName.C_Str();
+                    warn(meshName[0] ? format(tr("gdc.model.note.pointsLines"), ob.name.c_str(), meshName)
+                                     : format(tr("gdc.model.note.pointsLinesBare"), ob.name.c_str()));
                 }
                 continue;
             }
@@ -544,7 +547,7 @@ struct Converter {
                     auto found = infoByName.find(bone->mName.C_Str());
                     int tsNode = found != infoByName.end() ? tsNodeOf(found->second) : -1;
                     if (tsNode < 0) {
-                        warn(format("%s: bone '%s' has no node; bound to node 0", ob.name.c_str(), bone->mName.C_Str()));
+                        warn(format(tr("gdc.model.note.boneLoose"), bone->mName.C_Str(), ob.name.c_str()));
                         tsNode = 0;
                     }
                     const Mat4 boneWorld = found != infoByName.end() ? nodes[found->second].world : Mat4{};
@@ -625,8 +628,7 @@ struct Converter {
                 }
             }
             if (capped) {
-                warn(format("%s: %zu vertices had more than %d bone influences; smallest dropped", ob.name.c_str(), capped,
-                            kMaxBonesPerVertex));
+                warn(format(tr("gdc.model.note.boneCap"), ob.name.c_str(), capped, kMaxBonesPerVertex));
             }
             m.nodeIndex.assign(nodeBones.begin(), nodeBones.end());
             m.initialVerts = m.verts;
@@ -797,7 +799,7 @@ struct Converter {
                 scanTimes(ch->mKeys, ch->mNumKeys);
             }
             if (anim->mNumMeshChannels) {
-                warn(format("animation '%s': vertex-animation mesh channels are not supported; ignored", clip.name.c_str()));
+                warn(format(tr("gdc.model.note.vertAnim"), clip.name.c_str()));
             }
             if (!clip.byNode.empty() || !clip.morphs.empty()) {
                 clips.push_back(std::move(clip));
@@ -963,7 +965,7 @@ struct Converter {
                 if (mode == ScaleMode::Auto) {
                     mode = anyAligned ? ScaleMode::Aligned : ScaleMode::Uniform;
                 } else if (mode == ScaleMode::Uniform && anyAligned) {
-                    warn(format("sequence '%s': non-uniform scale averaged (uniform scale selected)", clip.name.c_str()));
+                    warn(format(tr("gdc.model.note.scaleAvg"), clip.name.c_str()));
                 }
                 seq.flags |= mode == ScaleMode::Uniform   ? uint32_t(SequenceFlag::UniformScale)
                              : mode == ScaleMode::Aligned ? uint32_t(SequenceFlag::AlignedScale)
@@ -1027,8 +1029,7 @@ struct Converter {
                 (void)targets;
             }
             if (seq.frameMatters.any()) {
-                warn(format("sequence '%s': morph weights stored as discrete mesh frames (dominant target per keyframe)",
-                            clip.name.c_str()));
+                warn(format(tr("gdc.model.note.morphPop"), clip.name.c_str()));
                 for (int objIndex = 0; objIndex < int(shape.objects.size()); ++objIndex) {
                     if (!seq.frameMatters.test(objIndex)) {
                         continue;
@@ -1227,7 +1228,7 @@ struct Converter {
         collectMarkers();
         collectObjects();
         if (objects.empty()) {
-            warn("scene has no triangle meshes");
+            warn(tr("gdc.model.note.noTriangles"));
         }
         buildObjectsAndDetails();
         importSequences();

@@ -6,6 +6,7 @@
 
 #include "core/platform.h"
 #include "core/strings.h"
+#include "texture/cook_validate.h"
 
 #include "native/vulkan/gdc_vulkan.h"
 
@@ -166,7 +167,7 @@ std::string vulkanCompress(const CookJob& job, int deviceIndex)
     if (fmt == 0) {
         return "unsupported Compressonator Vulkan target format: " + job.format;
     }
-    const std::string destination = u8str(u8path(job.srcFile).replace_extension(".dds"));
+    const std::string destination = ddsPathFor(job);
     uint32_t flags = 0;
     if (job.inputSRGB) flags |= GDC_FLAG_INPUT_SRGB;
     if (job.ignoreSRGB) flags |= GDC_FLAG_IGNORE_SRGB;

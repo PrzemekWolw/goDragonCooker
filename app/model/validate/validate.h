@@ -45,6 +45,14 @@ void checkUpAxis(ValidationReport& report, UpAxis expected, const RawFrame& raw,
 // `written` is the scene Assimp produces when it reads the file back.
 void checkGameLod(ValidationReport& report, const aiScene& written, const aiScene& source, bool hierarchy);
 
+// `restored` is Model::restoredNames() of the re-read file. `written` is the re-read scene.
+void checkStoredNames(ValidationReport& report, const std::vector<std::pair<std::string, std::string>>& restored,
+                      const aiScene& written);
+
+// Names Blender would change on import: a material split by vertex-color use (glTF only), and a part or mesh
+// name used twice (it becomes "name.001"). `written` is the re-read scene.
+void checkImportNames(ValidationReport& report, const aiScene& written, bool gltf);
+
 Capabilities intersect(const Capabilities& a, const Capabilities& b);
 
 } // namespace model

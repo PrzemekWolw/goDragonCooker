@@ -416,7 +416,9 @@ const char* cookVerdictName(CookVerdict verdict)
 
 std::string ddsPathFor(const CookJob& job)
 {
-    return u8str(u8path(job.srcFile).replace_extension(".dds"));
+    const fs::path src = u8path(job.srcFile);
+    const fs::path dir = job.outputDir.empty() ? src.parent_path() : u8path(job.outputDir);
+    return u8str(dir / (u8str(src.stem()) + ".dds"));
 }
 
 CookQuality validateCook(const CookJob& job, const std::string& ddsPath, const CookThresholds& thresholds)

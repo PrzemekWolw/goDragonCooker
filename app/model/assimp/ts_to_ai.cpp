@@ -7,6 +7,7 @@
 
 #include <assimp/scene.h>
 
+#include "core/i18n.h"
 #include "core/strings.h"
 #include "model/assimp/ai_bridge.h"
 #include "model/assimp/ai_meta.h"
@@ -127,7 +128,7 @@ struct Exporter {
         const int perFrame = m.vertsPerFrame > 0 ? m.vertsPerFrame : int(verts.size());
         const int frames = skin ? 1 : std::max(1, std::min(m.numFrames, perFrame ? int(verts.size()) / perFrame : 1));
         if (m.numMatFrames > 1) {
-            warn(format("%s: %d material (UV) frames dropped; only frame 0 is exported", name.c_str(), m.numMatFrames));
+            warn(format(tr("gdc.model.note.uvFrames"), name.c_str(), m.numMatFrames));
         }
 
         // Group primitives by material.
@@ -259,7 +260,7 @@ struct Exporter {
                         auto [it, inserted] = slotOfNode.emplace(node, slot);
                         if (!inserted && it->second != slot &&
                             std::memcmp(m.initialTransforms[it->second].m, m.initialTransforms[slot].m, sizeof(Mat4Raw)) != 0) {
-                            warn(format("%s: node '%s' has two bind matrices; second one approximated", name.c_str(),
+                            warn(format(tr("gdc.model.note.twoBinds"), name.c_str(),
                                         shape.name(shape.nodes[node].nameIndex).c_str()));
                         }
                         perBone[node].push_back({k, w});
@@ -411,16 +412,16 @@ struct Exporter {
                 channels.push_back(ch);
             }
             if (arbitraryRotated) {
-                warn(format("sequence '%s': arbitrary scale rotation dropped (exported as axis-aligned scale)", seqName.c_str()));
+                warn(format(tr("gdc.model.note.scaleRot"), seqName.c_str()));
             }
             if (seq.visMatters.any()) {
-                warn(format("sequence '%s': visibility animation is not representable; dropped", seqName.c_str()));
+                warn(format(tr("gdc.model.note.vis"), seqName.c_str()));
             }
             if (seq.matFrameMatters.any()) {
-                warn(format("sequence '%s': material frame animation dropped", seqName.c_str()));
+                warn(format(tr("gdc.model.note.matAnim"), seqName.c_str()));
             }
             if (seq.numGroundFrames > 0) {
-                warn(format("sequence '%s': %d ground frames dropped", seqName.c_str(), seq.numGroundFrames));
+                warn(format(tr("gdc.model.note.ground"), seqName.c_str(), seq.numGroundFrames));
             }
 
             std::vector<aiMeshMorphAnim*> morphs;

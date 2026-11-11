@@ -11,6 +11,7 @@
 
 #include <assimp/scene.h>
 
+#include "core/i18n.h"
 #include "core/strings.h"
 
 namespace model {
@@ -336,21 +337,23 @@ void checkUpAxis(ValidationReport& rep, UpAxis expected, const RawFrame& raw, co
     };
     nlohmann::json& j = rep.json["upAxis"];
     j["expected"] = upAxisName(expected);
+    auto axisLabel = [](UpAxis axis, bool negative) {
+        return negative ? format(tr("gdc.model.warn.negativeAxis"), upAxisName(axis)) : std::string(upAxisName(axis));
+    };
     if (!raw.ok) {
-        line(Verdict::Warn, "up axis: could not re-read the file to check it: " + raw.error);
+        line(Verdict::Warn, format(tr("gdc.model.warn.upUnread"), raw.error.c_str()));
         j["checked"] = false;
         rep.json["verdict"] = verdictName(rep.verdict);
         return;
     }
     Verdict v = Verdict::Pass;
-    std::string text = format("up axis: %s-up", upAxisName(expected));
+    std::string text = format(tr("gdc.model.warn.upOk"), upAxisName(expected));
     if (raw.declared) {
         const bool match = *raw.declared == expected && !raw.declaredNegative;
-        text += format(", file declares %s%s up", raw.declaredNegative ? "-" : "", upAxisName(*raw.declared));
         j["declared"] = std::string(raw.declaredNegative ? "-" : "") + upAxisName(*raw.declared);
         if (!match) {
             v = Verdict::Fail;
-            text += " (mismatch)";
+            text = format(tr("gdc.model.warn.upWrong"), axisLabel(*raw.declared, raw.declaredNegative).c_str(), upAxisName(expected));
         }
     }
     if (raw.hasGeometry && !source.tris.empty()) {
@@ -372,16 +375,17 @@ void checkUpAxis(ValidationReport& rep, UpAxis expected, const RawFrame& raw, co
         // the expected box, and the geometry check reports the loss.
         const bool inside = d[0] >= -tol && d[1] >= -tol && d[2] >= -tol && d[3] <= tol && d[4] <= tol && d[5] <= tol;
         if (worst > tol && inside) {
-            text += ", stored extents lie inside the game model (geometry is incomplete, see above)";
+            text += " ";
+            text += tr("gdc.model.warn.upSmaller");
             j["incomplete"] = true;
         } else if (worst > tol) {
             v = Verdict::Fail;
-            text += format(", stored extents %.3g x %.3g x %.3g but %.3g x %.3g x %.3g expected",
-                           raw.bounds.max.x - raw.bounds.min.x, raw.bounds.max.y - raw.bounds.min.y,
-                           raw.bounds.max.z - raw.bounds.min.z, wantMax.x - wantMin.x, wantMax.y - wantMin.y,
-                           wantMax.z - wantMin.z);
+            text += " ";
+            text += format(tr("gdc.model.warn.upSize"), raw.bounds.max.x - raw.bounds.min.x, raw.bounds.max.y - raw.bounds.min.y,
+                           raw.bounds.max.z - raw.bounds.min.z, wantMax.x - wantMin.x, wantMax.y - wantMin.y, wantMax.z - wantMin.z);
         } else {
-            text += ", stored extents match the game model";
+            text += " ";
+            text += tr("gdc.model.warn.upSizeOk");
         }
     }
     line(v, text);
@@ -444,7 +448,7 @@ void checkGameLod(ValidationReport& report, const aiScene& written, const aiScen
         if (int(Verdict::Warn) > int(report.verdict)) {
             report.verdict = Verdict::Warn;
         }
-        report.lines.push_back("WARN LOD: the format keeps no node names, so the game sees no detail levels or collision meshes");
+        report.lines.push_back(std::string("WARN ") + tr("gdc.model.warn.lodNoNames"));
         report.json["lod"] = {{"source", true}, {"detected", false}};
         report.json["verdict"] = verdictName(report.verdict);
         return;
@@ -460,11 +464,10 @@ void checkGameLod(ValidationReport& report, const aiScene& written, const aiScen
     report.json["lod"] = {{"source", true}, {"detected", detected}};
     if (!detected) {
         raise(Verdict::Fail);
-        report.lines.push_back(format(
-            "FAIL LOD: game does not see base/start under '%s'. Detail names fall back to size 2, so nulldetail hides the meshes.",
-            seen[0] ? seen : "(none)"));
+        report.lines.push_back(std::string("FAIL ") +
+                               format(tr("gdc.model.warn.lodMissing"), seen[0] ? seen : tr("gdc.model.warn.unnamed")));
     } else {
-        report.lines.push_back("LOD: base/start is where the game looks for detail levels");
+        report.lines.push_back(tr("gdc.model.warn.lodOk"));
     }
 
     std::set<std::string> want, got;
@@ -481,14 +484,177 @@ void checkGameLod(ValidationReport& report, const aiScene& written, const aiScen
     report.json["lod"]["meshNodesFound"] = want.size() - missingCount;
     if (missingCount) {
         raise(Verdict::Fail);
-        std::string text = format("FAIL LOD: %zu mesh node name(s) lost", missingCount);
-        for (const std::string& m : missing) {
-            text += " " + m;
+        std::string listed;
+        for (size_t i = 0; i < missing.size(); ++i) {
+            if (i) {
+                listed += ", ";
+            }
+            listed += missing[i];
         }
         if (missingCount > missing.size()) {
-            text += " ...";
+            if (!listed.empty()) {
+                listed += ", ";
+            }
+            listed += "...";
         }
-        report.lines.push_back(text);
+        report.lines.push_back(std::string("FAIL ") + format(tr("gdc.model.warn.lodNames"), missingCount, listed.c_str()));
+    }
+    report.json["verdict"] = verdictName(report.verdict);
+}
+
+void checkStoredNames(ValidationReport& report, const std::vector<std::pair<std::string, std::string>>& restored,
+                      const aiScene& written)
+{
+    auto raise = [&](Verdict v) {
+        if (int(v) > int(report.verdict)) {
+            report.verdict = v;
+        }
+    };
+    auto joinFirst = [](const std::vector<std::string>& items, size_t total) {
+        std::string s;
+        for (size_t i = 0; i < items.size(); ++i) {
+            s += (i ? ", " : "") + items[i];
+        }
+        return total > items.size() ? s + ", ..." : s;
+    };
+
+    // Load puts back the real name from the file's extras; the game and Blender ignore those and see the stored one.
+    if (restored.empty()) {
+        report.lines.push_back(tr("gdc.model.warn.namesStoredOk"));
+    } else {
+        raise(Verdict::Fail);
+        std::vector<std::string> shown;
+        for (size_t i = 0; i < restored.size() && i < 4; ++i) {
+            shown.push_back(format("%s -> %s", restored[i].first.c_str(), restored[i].second.c_str()));
+        }
+        report.lines.push_back(std::string("FAIL ") +
+                               format(tr("gdc.model.warn.namesStored"), restored.size(), joinFirst(shown, restored.size()).c_str()));
+    }
+    report.json["storedNames"] = {{"renamed", restored.size()}};
+
+    // Two materials with one name are told apart by Blender with ".001" and by the game not at all.
+    std::map<std::string, size_t> uses;
+    for (unsigned i = 0; i < written.mNumMaterials; ++i) {
+        aiString name;
+        if (written.mMaterials[i]->Get(AI_MATKEY_NAME, name) == aiReturn_SUCCESS && name.length) {
+            ++uses[name.C_Str()];
+        }
+    }
+    std::vector<std::string> repeated;
+    size_t repeatedCount = 0;
+    for (const auto& [name, count] : uses) {
+        if (count > 1) {
+            ++repeatedCount;
+            if (repeated.size() < 4) {
+                repeated.push_back(name);
+            }
+        }
+    }
+    report.json["storedNames"]["duplicateMaterials"] = repeatedCount;
+    if (repeatedCount) {
+        raise(Verdict::Warn);
+        report.lines.push_back(std::string("WARN ") +
+                               format(tr("gdc.model.warn.matRepeated"), repeatedCount, joinFirst(repeated, repeatedCount).c_str()));
+    }
+    report.json["verdict"] = verdictName(report.verdict);
+}
+
+void checkImportNames(ValidationReport& report, const aiScene& written, bool gltf)
+{
+    auto joinFirst = [](const std::vector<std::string>& items, size_t total) {
+        std::string s;
+        for (size_t i = 0; i < items.size(); ++i) {
+            s += (i ? ", " : "") + items[i];
+        }
+        return total > items.size() ? s + ", ..." : s;
+    };
+    auto warn = [&](const char* id, size_t count, const std::vector<std::string>& names) {
+        if (int(Verdict::Warn) > int(report.verdict)) {
+            report.verdict = Verdict::Warn;
+        }
+        report.lines.push_back(std::string("WARN ") + format(tr(id), count, joinFirst(names, count).c_str()));
+    };
+    constexpr size_t kShown = 4;
+    size_t problems = 0;
+
+    // Blender's glTF importer builds one material per vertex-color use ("name" and "name.001") when a material is
+    // on primitives with and without COLOR_0.
+    if (gltf) {
+        std::vector<char> colored(written.mNumMaterials, 0), plain(written.mNumMaterials, 0);
+        for (unsigned i = 0; i < written.mNumMeshes; ++i) {
+            const aiMesh* m = written.mMeshes[i];
+            if (m->mMaterialIndex < written.mNumMaterials) {
+                (m->HasVertexColors(0) ? colored : plain)[m->mMaterialIndex] = 1;
+            }
+        }
+        std::vector<std::string> split;
+        size_t splitCount = 0;
+        for (unsigned i = 0; i < written.mNumMaterials; ++i) {
+            if (colored[i] && plain[i]) {
+                ++splitCount;
+                aiString name;
+                written.mMaterials[i]->Get(AI_MATKEY_NAME, name);
+                if (split.size() < kShown) {
+                    split.push_back(name.length ? name.C_Str() : format("#%u", i));
+                }
+            }
+        }
+        report.json["importNames"]["splitMaterials"] = splitCount;
+        if (splitCount) {
+            warn("gdc.model.warn.matSplit", splitCount, split);
+            ++problems;
+        }
+    }
+
+    // Blender keeps one name per object and per mesh, so a name used by two parts becomes "name.001".
+    std::map<std::string, size_t> nodeUses;
+    std::map<std::string, std::set<const aiNode*>> meshHolders;
+    auto walk = [&](auto& self, const aiNode* n, bool root) -> void {
+        if (!root && n->mName.length) {
+            ++nodeUses[n->mName.C_Str()];
+        }
+        for (unsigned i = 0; i < n->mNumMeshes; ++i) {
+            if (n->mMeshes[i] < written.mNumMeshes) {
+                meshHolders[written.mMeshes[n->mMeshes[i]]->mName.C_Str()].insert(n);
+            }
+        }
+        for (unsigned i = 0; i < n->mNumChildren; ++i) {
+            self(self, n->mChildren[i], false);
+        }
+    };
+    if (written.mRootNode) {
+        walk(walk, written.mRootNode, true);
+    }
+    std::vector<std::string> nodeNames, meshNames;
+    size_t nodeCount = 0, meshCount = 0;
+    for (const auto& [name, count] : nodeUses) {
+        if (count > 1) {
+            ++nodeCount;
+            if (nodeNames.size() < kShown) {
+                nodeNames.push_back(name);
+            }
+        }
+    }
+    for (const auto& [name, holders] : meshHolders) {
+        if (holders.size() > 1) {
+            ++meshCount;
+            if (meshNames.size() < kShown) {
+                meshNames.push_back(name);
+            }
+        }
+    }
+    report.json["importNames"]["duplicateNodes"] = nodeCount;
+    report.json["importNames"]["duplicateMeshes"] = meshCount;
+    if (nodeCount) {
+        warn("gdc.model.warn.nodesRepeated", nodeCount, nodeNames);
+        ++problems;
+    }
+    if (meshCount) {
+        warn("gdc.model.warn.meshesRepeated", meshCount, meshNames);
+        ++problems;
+    }
+    if (!problems) {
+        report.lines.push_back(tr("gdc.model.warn.importNamesOk"));
     }
     report.json["verdict"] = verdictName(report.verdict);
 }
@@ -539,60 +705,71 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
                           {"details", src.details.size()},       {"resultDetails", dst.details.size()},
                           {"skinnedMeshes", src.skinnedMeshes},  {"resultSkinnedMeshes", dst.skinnedMeshes},
                           {"animations", src.anims.size()},      {"resultAnimations", dst.anims.size()}};
-        Verdict v = Verdict::Pass;
-        if (caps.hierarchy && found < src.nodes.size()) {
-            v = Verdict::Warn;
+        auto joinNames = [](const std::vector<std::string>& names, bool more) {
+            std::string s;
+            for (size_t i = 0; i < names.size(); ++i) {
+                if (i) {
+                    s += ", ";
+                }
+                s += names[i];
+            }
+            if (more) {
+                if (!s.empty()) {
+                    s += ", ";
+                }
+                s += "...";
+            }
+            return s;
+        };
+        const bool nodesMissing = caps.hierarchy && found < src.nodes.size();
+        const bool matsMissing = caps.materials && matsFound < usedSrcMats.size();
+        const bool detailsDiffer = caps.lods && !src.details.empty() && src.details.size() != dst.details.size();
+        if (!nodesMissing && !matsMissing && !detailsDiffer) {
+            if (caps.lods && !src.details.empty()) {
+                line(Verdict::Pass, format(tr("gdc.model.warn.namesOkDetails"), src.nodes.size(), usedSrcMats.size(), src.details.size()));
+            } else {
+                line(Verdict::Pass, format(tr("gdc.model.warn.namesOk"), src.nodes.size(), usedSrcMats.size()));
+            }
         }
-        if (caps.materials && matsFound < usedSrcMats.size()) {
-            v = Verdict::Warn;
-        }
-        if (caps.lods && !src.details.empty() && src.details.size() != dst.details.size()) {
-            v = Verdict::Warn;
-        }
-        std::string text = format("structure: nodes %zu/%zu, materials %zu/%zu", found, src.nodes.size(), matsFound, usedSrcMats.size());
-        if (caps.lods && !src.details.empty()) {
-            text += format(", details %zu/%zu", dst.details.size(), src.details.size());
-        }
-        if (caps.hierarchy && found < src.nodes.size()) {
+        if (nodesMissing) {
             std::vector<std::string> missing;
             for (const NodePose& n : src.nodes) {
                 if (!dstNodes.count(toLower(n.name)) && missing.size() < 4) {
                     missing.push_back(n.name);
                 }
             }
-            text += " (missing";
-            for (const std::string& m : missing) {
-                text += " " + m;
-            }
-            text += found + missing.size() < src.nodes.size() ? " ...)" : ")";
+            line(Verdict::Warn, format(tr("gdc.model.warn.namesParts"), found, src.nodes.size(),
+                                       joinNames(missing, found + missing.size() < src.nodes.size()).c_str()));
         }
-        if (caps.materials && matsFound < usedSrcMats.size()) {
-            text += " (missing materials";
-            size_t listed = 0;
+        if (matsMissing) {
+            std::vector<std::string> missing;
             for (const std::string& m : usedSrcMats) {
-                if (!dstMats.count(m) && listed++ < 4) {
-                    text += " " + m;
+                if (!dstMats.count(m) && missing.size() < 4) {
+                    missing.push_back(m);
                 }
             }
-            text += ")";
+            line(Verdict::Warn, format(tr("gdc.model.warn.namesMats"), matsFound, usedSrcMats.size(),
+                                       joinNames(missing, matsFound + missing.size() < usedSrcMats.size()).c_str()));
         }
-        line(v, text);
+        if (detailsDiffer) {
+            line(Verdict::Warn, format(tr("gdc.model.warn.namesDetails"), dst.details.size(), src.details.size()));
+        }
         if (caps.skins && src.skinnedMeshes > 0 && dst.skinnedMeshes == 0) {
-            line(Verdict::Fail, format("skin: %d skinned mesh(es) became rigid", src.skinnedMeshes));
+            line(Verdict::Fail, format(tr("gdc.model.warn.skinRigid"), src.skinnedMeshes));
         }
         if (caps.animations && !src.anims.empty() && dst.anims.empty()) {
-            line(Verdict::Fail, format("animation: %zu animation(s) lost", src.anims.size()));
+            line(Verdict::Fail, format(tr("gdc.model.warn.animLost"), src.anims.size()));
         }
         if (caps.morphs && src.morphTargets > 0 && dst.morphTargets < src.morphTargets) {
-            line(Verdict::Warn, format("morphs: %d of %d targets kept", dst.morphTargets, src.morphTargets));
+            line(Verdict::Warn, format(tr("gdc.model.warn.morphs"), dst.morphTargets, src.morphTargets));
         }
     }
 
     if (dst.nanValues > src.nanValues) {
-        line(Verdict::Fail, format("NaN/Inf: %zu new non-finite values", dst.nanValues - src.nanValues));
+        line(Verdict::Fail, format(tr("gdc.model.warn.nan"), dst.nanValues - src.nanValues));
     }
     if (dst.degenerate > src.degenerate) {
-        line(Verdict::Warn, format("degenerate: %zu new zero-area triangles", dst.degenerate - src.degenerate));
+        line(Verdict::Warn, format(tr("gdc.model.warn.flat"), dst.degenerate - src.degenerate));
     }
 
     // --- per group geometry and attributes ---
@@ -607,14 +784,21 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
     for (const auto& [group, sets] : groups) {
         const auto& A = sets.first;
         const auto& B = sets.second;
-        const std::string tag = groups.size() > 1 ? format("[detail %d] ", group) : std::string();
+        const std::string tag = groups.size() <= 1 ? std::string(tr("gdc.model.warn.shapePrefix"))
+                                 : group < 0       ? format(tr("gdc.model.warn.detailCollision"), group)
+                                                   : format(tr("gdc.model.warn.detailLevel"), group);
         nlohmann::json g;
         g["group"] = group;
         g["triangles"] = A.size();
         g["resultTriangles"] = B.size();
         if (A.empty() || B.empty()) {
-            line(A.empty() ? Verdict::Warn : Verdict::Fail,
-                 tag + format("geometry: %zu source triangles, %zu result triangles", A.size(), B.size()));
+            if (A.empty() && B.empty()) {
+                line(Verdict::Warn, format(tr("gdc.model.warn.shapeEmpty"), tag.c_str()));
+            } else if (B.empty()) {
+                line(Verdict::Fail, format(tr("gdc.model.warn.shapeMissing"), tag.c_str(), A.size()));
+            } else {
+                line(Verdict::Warn, format(tr("gdc.model.warn.shapeExtraOnly"), tag.c_str(), B.size()));
+            }
             jg.push_back(g);
             continue;
         }
@@ -659,11 +843,27 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
             if (maxDist > posTol * 10.0 && (ab.outliers || ba.outliers || matchedFrac < 0.999)) {
                 v = Verdict::Fail;
             }
-            std::string text = format("geometry: %zu/%zu triangles matched (%zu extra", match.pairs.size(), comparable, match.unmatchedB);
-            if (match.droppedDegenerate) {
-                text += format(", %zu below tolerance skipped", match.droppedDegenerate);
+            if (v == Verdict::Pass && !match.droppedDegenerate) {
+                line(Verdict::Pass, format(tr("gdc.model.warn.shapeExact"), tag.c_str(), comparable));
+            } else {
+                std::string text = format(tr("gdc.model.warn.shape"), tag.c_str(), match.pairs.size(), comparable, match.unmatchedA,
+                                          match.unmatchedB, maxDist, 100.0 * maxDist / diag);
+                if (match.droppedDegenerate) {
+                    text += " ";
+                    text += format(tr("gdc.model.warn.shapeTiny"), match.droppedDegenerate);
+                }
+                text += " ";
+                if (v == Verdict::Fail) {
+                    text += tr("gdc.model.warn.shapeBad");
+                } else if (match.unmatchedA || match.unmatchedB) {
+                    text += tr("gdc.model.warn.shapeClose");
+                } else if (v == Verdict::Warn) {
+                    text += tr("gdc.model.warn.shapeShift");
+                } else {
+                    text += tr("gdc.model.warn.shapeOk");
+                }
+                line(v, text);
             }
-            line(v, tag + text + format("), max %.3g (%.2g of bbox), rms %.3g", maxDist, maxDist / diag, std::max(ab.dist.rms(), ba.dist.rms())));
         }
 
         size_t flipped = 0;
@@ -672,7 +872,7 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
         }
         g["windingFlipped"] = flipped;
         line(flipped * 100 > match.pairs.size() ? Verdict::Fail : flipped ? Verdict::Warn : Verdict::Pass,
-             tag + format("winding: %zu flipped", flipped));
+             format(tr(flipped ? "gdc.model.warn.windingFlip" : "gdc.model.warn.windingOk"), tag.c_str(), flipped));
 
         if (caps.normals && src.hasNormals && dst.hasNormals) {
             Stat ang;
@@ -691,7 +891,13 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
             if (nflip * 100 > ang.count) {
                 v = Verdict::Fail;
             }
-            line(v, tag + format("normals: max %.2f deg, rms %.3f deg, %zu flipped", ang.max, ang.rms(), nflip));
+            if (nflip) {
+                line(v, format(tr("gdc.model.warn.normalsBack"), tag.c_str(), nflip, ang.max));
+            } else if (v == Verdict::Warn) {
+                line(v, format(tr("gdc.model.warn.normalsShift"), tag.c_str(), ang.max));
+            } else {
+                line(v, format(tr("gdc.model.warn.normalsOk"), tag.c_str()));
+            }
 
             const double q = std::max(posTol * 4.0, diag * 1e-7);
             const auto creaseA = edgeCreases(A, q);
@@ -717,9 +923,9 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
             g["hardEdgesLost"] = lost;
             g["hardEdgesNew"] = added;
             line(lost || added ? Verdict::Warn : Verdict::Pass,
-                 tag + format("sharp edges: %zu hard, %zu lost, %zu new", hardCount, lost, added));
+                 format(tr(lost || added ? "gdc.model.warn.edgesChanged" : "gdc.model.warn.edgesOk"), tag.c_str(), hardCount, lost, added));
         } else if (src.hasNormals && !dst.hasNormals) {
-            line(Verdict::Warn, tag + "normals: not stored by the target");
+            line(Verdict::Warn, format(tr("gdc.model.warn.normalsMissing"), tag.c_str()));
         }
 
         auto uvCheck = [&](const char* name, bool second) {
@@ -750,27 +956,39 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
             }
             g[std::string(name) + "Max"] = d.max;
             g[std::string(name) + "VFlipped"] = vflip;
-            line(d.max > uvTol || vflip ? Verdict::Warn : Verdict::Pass,
-                 tag + format("%s: max %.3g, rms %.3g, %zu V-flipped", name, d.max, d.rms(), vflip));
+            const bool bad = d.max > uvTol || vflip;
+            const char* id = "gdc.model.warn.uv0Ok";
+            if (second) {
+                id = !bad ? "gdc.model.warn.uv1Ok" : vflip ? "gdc.model.warn.uv1Both" : "gdc.model.warn.uv1Moved";
+            } else if (bad) {
+                id = vflip ? "gdc.model.warn.uv0Both" : "gdc.model.warn.uv0Moved";
+            }
+            if (!bad) {
+                line(Verdict::Pass, format(tr(id), tag.c_str()));
+            } else if (vflip) {
+                line(Verdict::Warn, format(tr(id), tag.c_str(), d.max, vflip));
+            } else {
+                line(Verdict::Warn, format(tr(id), tag.c_str(), d.max));
+            }
         };
         if (caps.uv && src.hasUv0) {
             if (dst.hasUv0) {
                 uvCheck("uv0", false);
             } else {
-                line(Verdict::Warn, tag + "uv0: lost");
+                line(Verdict::Warn, format(tr("gdc.model.warn.uv0Lost"), tag.c_str()));
             }
         }
         if (caps.uv2 && src.hasUv1) {
             if (dst.hasUv1) {
                 uvCheck("uv1", true);
             } else {
-                line(Verdict::Warn, tag + "uv1: lost");
+                line(Verdict::Warn, format(tr("gdc.model.warn.uv1Lost"), tag.c_str()));
             }
         }
 
         if (caps.colors && src.hasColors) {
             if (!dst.hasColors) {
-                line(Verdict::Warn, tag + "colors: lost");
+                line(Verdict::Warn, format(tr("gdc.model.warn.colorLost"), tag.c_str()));
             } else {
                 int maxd = 0;
                 for (const Pair& p : match.pairs) {
@@ -781,7 +999,11 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
                     }
                 }
                 g["colorMax"] = maxd;
-                line(maxd > tol.color ? Verdict::Warn : Verdict::Pass, tag + format("colors: max %d/255", maxd));
+                if (maxd > tol.color) {
+                    line(Verdict::Warn, format(tr(maxd >= 64 ? "gdc.model.warn.colorFar" : "gdc.model.warn.colorDiff"), tag.c_str(), maxd));
+                } else {
+                    line(Verdict::Pass, format(tr("gdc.model.warn.colorOk"), tag.c_str()));
+                }
             }
         }
 
@@ -802,8 +1024,24 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
             }
             g["tangentMaxDeg"] = ang.max;
             g["handednessMismatch"] = hand;
-            line(ang.max > tol.tangentDeg || hand ? Verdict::Warn : Verdict::Pass,
-                 tag + format("tangents: max %.2f deg, %zu handedness mismatched", ang.max, hand));
+            const bool angle = ang.max > tol.tangentDeg;
+            const char* id = "gdc.model.warn.tangentOk";
+            if (angle && hand) {
+                id = "gdc.model.warn.tangentBoth";
+            } else if (hand) {
+                id = "gdc.model.warn.tangentMirror";
+            } else if (angle) {
+                id = "gdc.model.warn.tangentAngle";
+            }
+            if (angle && hand) {
+                line(Verdict::Warn, format(tr(id), tag.c_str(), ang.max, hand));
+            } else if (hand) {
+                line(Verdict::Warn, format(tr(id), tag.c_str(), hand));
+            } else if (angle) {
+                line(Verdict::Warn, format(tr(id), tag.c_str(), ang.max));
+            } else {
+                line(Verdict::Pass, format(tr(id), tag.c_str()));
+            }
         }
 
         if (caps.materials) {
@@ -814,7 +1052,8 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
                 changed += a != b && !a.empty();
             }
             g["materialChanged"] = changed;
-            line(changed ? Verdict::Warn : Verdict::Pass, tag + format("materials: %zu triangle(s) changed material", changed));
+            line(changed ? Verdict::Warn : Verdict::Pass,
+                 format(tr(changed ? "gdc.model.warn.materialChanged" : "gdc.model.warn.materialOk"), tag.c_str(), changed));
         }
 
         if (caps.skins && src.skinnedMeshes && dst.skinnedMeshes) {
@@ -851,8 +1090,13 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
             g["skinnedVertices"] = skinned;
             g["weightMaxDiff"] = maxW;
             g["missingInfluences"] = missing;
-            line(maxW > tol.weight || missing ? Verdict::Warn : Verdict::Pass,
-                 tag + format("skin: %zu skinned vertices, max weight diff %.4f, %zu missing influences", skinned, maxW, missing));
+            if (missing) {
+                line(Verdict::Warn, format(tr("gdc.model.warn.skinMissing"), tag.c_str(), skinned, maxW, missing));
+            } else if (maxW > tol.weight) {
+                line(Verdict::Warn, format(tr("gdc.model.warn.skinDiff"), tag.c_str(), skinned, maxW));
+            } else {
+                line(Verdict::Pass, format(tr("gdc.model.warn.skinOk"), tag.c_str(), skinned));
+            }
         }
         jg.push_back(g);
     }
@@ -872,7 +1116,7 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
                 b = &dst.anims.front();
             }
             if (!b) {
-                line(Verdict::Warn, format("animation '%s': missing", a.name.c_str()));
+                line(Verdict::Warn, format(tr("gdc.model.warn.animMissing"), a.name.c_str()));
                 continue;
             }
             std::unordered_map<std::string, size_t> idx;
@@ -903,9 +1147,12 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
                           {"duration", a.duration},
                           {"resultDuration", b->duration}});
             const bool bad = maxRot > tol.rotDeg || maxTrans > tol.transRel * diag || missingNodes || durDiff > 1e-3;
-            line(bad ? Verdict::Warn : Verdict::Pass,
-                 format("animation '%s': %zu moving nodes (%zu missing), max rot %.3f deg, max trans %.3g, duration %.3f/%.3f s",
-                        a.name.c_str(), a.nodes.size(), missingNodes, maxRot, maxTrans, a.duration, b->duration));
+            if (bad) {
+                line(Verdict::Warn, format(tr("gdc.model.warn.animBad"), a.name.c_str(), missingNodes, a.nodes.size(), maxRot, maxTrans,
+                                           a.duration, b->duration));
+            } else {
+                line(Verdict::Pass, format(tr("gdc.model.warn.animOk"), a.name.c_str(), a.nodes.size(), a.duration));
+            }
         }
         j["animations"] = ja;
     }

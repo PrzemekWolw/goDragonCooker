@@ -13,6 +13,7 @@
 #include "texture/cook_retry.h"
 #include "texture/cook_rules.h"
 #include "texture/cook_validate.h"
+#include "texture/normal_space.h"
 #include "texture/texconv.h"
 
 static void corruptBlocks(const std::string& dds)
@@ -35,10 +36,14 @@ int main(int argc, char** argv)
     CookThresholds thresholds;
     bool retry = false, corrupt = false;
     std::vector<std::pair<std::string, std::string>> inputs;
+    std::vector<std::pair<std::string, std::string>> spaceChecks;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--work" && i + 1 < argc) {
             work = argv[++i];
+        } else if (a == "--normal-space" && i + 2 < argc) {
+            const std::string expect = argv[++i];
+            spaceChecks.emplace_back(expect, argv[++i]);
         } else if (a == "--target" && i + 1 < argc) {
             thresholds.bc7 = thresholds.bc5 = thresholds.bc4 = std::stod(argv[++i]);
         } else if (a == "--retry") {
@@ -52,8 +57,33 @@ int main(int argc, char** argv)
             return 2;
         }
     }
+    if (!spaceChecks.empty()) {
+        int failures = 0;
+        for (const auto& [expect, image] : spaceChecks) {
+            const NormalEncoding encoding = detectNormalEncoding(image);
+            const bool match = normalEncodingName(encoding) == expect;
+            std::fprintf(stderr, "%s %s %s\n", match ? "OK" : "FAIL", normalEncodingName(encoding), image.c_str());
+            if (!match) {
+                ++failures;
+            } else if (encoding == NormalEncoding::Srgb || encoding == NormalEncoding::DoubleLinear) {
+                std::error_code ec;
+                const fs::path out = fs::temp_directory_path(ec) / "gdc_normal_fix.bmp";
+                std::string error;
+                const bool fixed = !linearizeNormalMap(image, encoding, u8str(out), error).empty() &&
+                                   detectNormalEncoding(u8str(out)) == NormalEncoding::Linear;
+                fs::remove(out, ec);
+                std::fprintf(stderr, "%s roundtrip %s\n", fixed ? "OK" : "FAIL", image.c_str());
+                failures += !fixed;
+            }
+        }
+        if (work.empty()) {
+            std::fprintf(stderr, "%d failure(s)\n", failures);
+            return failures ? 1 : 0;
+        }
+    }
     if (work.empty() || inputs.empty()) {
         std::fprintf(stderr, "usage: gdc_cook_test --work <dir> [--target dB] [--retry] [--corrupt] <role>:<image>...\n");
+        std::fprintf(stderr, "       gdc_cook_test --normal-space <linear|sRGB|double-linear> <image>\n");
         return 2;
     }
     if (const std::string error = texconvInit(); !error.empty()) {

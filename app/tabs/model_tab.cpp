@@ -18,6 +18,7 @@
 #include "imgui_stdlib.h"
 #include "model/convert.h"
 #include "model/ts/ts_io.h"
+#include "ui/icons.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 
@@ -311,21 +312,21 @@ bool formatSettingsUI(const model::Format& f, nlohmann::json& values)
     return changed;
 }
 
-ImVec4 modelLogColor(const std::string& line)
+LogLevel modelLogLevel(const std::string& line)
 {
     if (hasPrefix(line, "  OK:")) {
-        return colCookOk;
+        return LogLevel::Ok;
     }
     if (hasPrefix(line, "  FAIL:") || hasPrefix(line, "      FAIL")) {
-        return colCookErr;
+        return LogLevel::Error;
     }
     if (hasPrefix(line, "  WARN:") || hasPrefix(line, "      WARN")) {
-        return colWarn;
+        return LogLevel::Warn;
     }
     if (hasPrefix(line, "  SKIP:") || hasPrefix(line, "      ")) {
-        return colTextDim;
+        return LogLevel::Detail;
     }
-    return colText;
+    return LogLevel::Info;
 }
 
 } // namespace
@@ -396,11 +397,12 @@ void modelTabUI()
     ImGui::TextUnformatted(tr("gdc.model.modelsDirectory"));
     dirty |= ImGui::InputText("##model_directory", &s.directory);
     ImGui::SameLine();
-    if (ImGui::Button(trId("gdc.common.browse", "model_dir").c_str())) {
+    if (iconButton(ICON_FOLDER_OPEN, "model_dir")) {
         openDirPicker(&s.directory);
     }
+    tooltip("gdc.common.browse");
     ImGui::SameLine();
-    if (ImGui::Button(trId("gdc.model.scan", "model_scan").c_str()) && !s.directory.empty()) {
+    if (ImGui::Button(iconLabel(ICON_REFRESH, "gdc.model.scan", "model_scan").c_str()) && !s.directory.empty()) {
         scan(t);
     }
 
@@ -463,9 +465,10 @@ void modelTabUI()
     if (s.mirror) {
         dirty |= ImGui::InputText("##model_outdir", &s.outDir);
         ImGui::SameLine();
-        if (ImGui::Button(trId("gdc.common.browse", "model_out").c_str())) {
+        if (iconButton(ICON_FOLDER_OPEN, "model_out")) {
             openDirPicker(&s.outDir);
         }
+        tooltip("gdc.common.browse");
     }
     dirty |= ImGui::Checkbox(trId("gdc.model.overwriteExistingFiles", "model_overwrite").c_str(), &s.overwrite);
     tooltip("gdc.model.overwriteExistingFiles.tooltip");
@@ -489,10 +492,11 @@ void modelTabUI()
         logLines = t.task.logLines;
     }
     if (running) {
-        if (ImGui::Button(trId("gdc.model.stopConverter", "model_run").c_str())) {
+        if (ImGui::Button(iconLabel(ICON_STOP, "gdc.model.stopConverter", "model_run").c_str())) {
             t.task.stop = true;
         }
-    } else if (ImGui::Button(trId("gdc.model.convertModels", "model_run").c_str()) && !s.directory.empty()) {
+    } else if (ImGui::Button(iconLabel(ICON_PLAY_ARROW, "gdc.model.convertModels", "model_run").c_str()) &&
+               !s.directory.empty()) {
         if (t.found.empty() || t.scannedDir != s.directory) {
             scan(t);
         }
@@ -502,7 +506,6 @@ void modelTabUI()
     ImGui::Text(tr("gdc.common.status"), status.empty() ? tr("gdc.common.waiting") : status.c_str());
 
     ImGui::Separator();
-    ImGui::TextUnformatted(tr("gdc.common.output"));
-    logView("##model_log", logLines, 280, modelLogColor);
+    logView("##model_log", logLines, 280, modelLogLevel);
     ImGui::EndTabItem();
 }

@@ -83,7 +83,9 @@ std::vector<std::string> cookArgs(const CookJob& job, const std::vector<std::str
     if (isExpensiveCodec(job.format)) {
         args.insert(args.end(), gpuArgs.begin(), gpuArgs.end());
     }
-    const std::string dir = outDir.empty() ? u8str(u8path(job.srcFile).parent_path()) : outDir;
+    const std::string dir = !outDir.empty() ? outDir
+                            : !job.outputDir.empty() ? job.outputDir
+                                                     : u8str(u8path(job.srcFile).parent_path());
     args.insert(args.end(), {"-o", dir, "-f", job.format, "--", job.srcFile});
     return args;
 }

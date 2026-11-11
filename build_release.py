@@ -36,6 +36,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -289,6 +290,23 @@ def log(msg: str, *, info: bool = True, error: bool = False):
         tag = "ERROR" if error else ("INFO" if info else "")
     prefix = f"[{tag}] " if tag else ""
     print(f"{prefix}{msg}")
+
+
+def remove_tree(path: Path):
+    """Delete a tree, including the read-only files Git leaves in fetched checkouts.
+
+    CMake FetchContent clones (Imath under the Texconv build, the app's own
+    dependencies) mark pack files read-only. Windows then returns access denied
+    from os.unlink, and shutil.rmtree stops.
+    """
+
+    def onexc(func, name, exc):
+        if not isinstance(exc, PermissionError):
+            raise exc
+        os.chmod(name, stat.S_IWRITE)
+        func(name)
+
+    shutil.rmtree(path, onexc=onexc)
 
 
 # A MinGW OpenEXR/TIFF on CMAKE_PREFIX_PATH makes the MSVC ARM64 build include
@@ -713,7 +731,7 @@ def build_texconv_target(target: dict):
     texconv_build_dir = TEXCONV_SOURCE / f"build_{architecture}"
     if texconv_build_dir.exists() and not arch_stamp_matches("texconv", target, flags):
         log(f"  Removing {texconv_build_dir.name} built with other CPU flags")
-        shutil.rmtree(texconv_build_dir)
+        remove_tree(texconv_build_dir)
     if flags:
         log(f"  Texconv CPU flags: {flags}")
     gpu_mode = "with GPU codec" if target["platform"] == "windows" else "without GPU codec"
@@ -846,7 +864,7 @@ def build_vulkan(targets: list[dict], skip: bool):
         install_dir = PROJECT / ".build" / f"vulkan-install-{target['name']}"
         build_dir.mkdir(parents=True, exist_ok=True)
         if install_dir.exists():
-            shutil.rmtree(install_dir)
+            remove_tree(install_dir)
         install_dir.mkdir(parents=True, exist_ok=True)
         msvc_arm64 = (
             target["platform"] == "windows" and target["goarch"] == "arm64"
@@ -908,7 +926,7 @@ def build_vulkan(targets: list[dict], skip: bool):
         cache = build_dir / "CMakeCache.txt"
         if cache.is_file() and "msys64" in cache.read_text(encoding="utf-8", errors="replace").lower():
             log(f"  Removing {build_dir.name} configured against MinGW libraries")
-            shutil.rmtree(build_dir)
+            remove_tree(build_dir)
         reset_stale_cmake_generator(build_dir, configure)
         run(configure, env=env, drop_env=MSVC_CONFIG_ENV_DROP if msvc_arm64 else ())
         run(["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", str(CPU_THREADS)], env=env)
@@ -980,11 +998,11 @@ def clean():
 
     legacy_artifacts = PROJECT / ".build"
     if legacy_artifacts.exists():
-        shutil.rmtree(legacy_artifacts)
+        remove_tree(legacy_artifacts)
         log("  removed legacy .build/")
 
     if DIST_DIR.exists():
-        shutil.rmtree(DIST_DIR)
+        remove_tree(DIST_DIR)
         log("  removed dist/")
 
 
@@ -1018,7 +1036,7 @@ def reset_stale_cmake_generator(build_dir: Path, command: list[str]):
             break
     if cached and cached != wanted:
         log(f"  Removing {build_dir.name} configured with {cached}")
-        shutil.rmtree(build_dir)
+        remove_tree(build_dir)
 
 
 def visual_studio_generator() -> str:
@@ -1205,7 +1223,7 @@ def run_self_tests(target: dict, stage: Path):
 
     converted = PROJECT / ".build" / f"selftest-model-{target['name']}"
     if converted.exists():
-        shutil.rmtree(converted)
+        remove_tree(converted)
     run_report([
         str(binaries["gdc_model_test"]),
         "--convert", "glb,glb-draco,dae,cdae,dts",
@@ -1217,14 +1235,14 @@ def run_self_tests(target: dict, stage: Path):
     cook = str(binaries["gdc_cook_test"])
     cooked = PROJECT / ".build" / f"selftest-cook-{target['name']}"
     if cooked.exists():
-        shutil.rmtree(cooked)
+        remove_tree(cooked)
     run_report([
         cook, "--work", str(cooked),
         f"color:{image}", f"normal:{image}", f"dataR:{image}",
     ], cwd=stage)
     corrupted = PROJECT / ".build" / f"selftest-cook-corrupt-{target['name']}"
     if corrupted.exists():
-        shutil.rmtree(corrupted)
+        remove_tree(corrupted)
     run_report([cook, "--work", str(corrupted), "--corrupt", f"color:{image}"], cwd=stage)
     log(f"Self-test {target['name']} passed")
 
@@ -1253,7 +1271,7 @@ def package_target(target: dict, run_tests: bool = False):
     DIST_DIR.mkdir(exist_ok=True)
     stage = DIST_DIR / target["name"]
     if stage.exists():
-        shutil.rmtree(stage)
+        remove_tree(stage)
     stage.mkdir()
     stage_bin = stage / "bin" / target["name"]
     stage_bin.mkdir(parents=True)
@@ -1292,7 +1310,7 @@ def package_target(target: dict, run_tests: bool = False):
     zip_size = zip_path.stat().st_size / (1024 * 1024)
     log(f"Packed {target['zip_name']} ({zip_size:.1f} MB)")
 
-    shutil.rmtree(stage)
+    remove_tree(stage)
 
 
 # ---------------------------------------------------------------------------

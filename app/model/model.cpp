@@ -10,6 +10,7 @@
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 
+#include "core/i18n.h"
 #include "core/platform.h"
 #include "core/strings.h"
 #include "model/axis.h"
@@ -30,12 +31,14 @@ bool sameOptions(const ts::TsToAiOptions& a, const ts::TsToAiOptions& b)
 }
 
 // Undoes writer renames recorded under kOriginalNameKey, in nodes, bones and animation channels.
-void restoreOriginalNames(aiScene& scene)
+// Returns the (stored name, real name) pairs it had to change.
+std::vector<std::pair<std::string, std::string>> restoreOriginalNames(aiScene& scene)
 {
     std::map<std::string, std::string> renamed;
     auto walk = [&](auto& self, aiNode* n) -> void {
         aiString original;
-        if (n->mMetaData && n->mMetaData->Get(kOriginalNameKey, original) && original.length) {
+        if (n->mMetaData && n->mMetaData->Get(kOriginalNameKey, original) && original.length &&
+            std::string(n->mName.C_Str()) != original.C_Str()) {
             renamed[n->mName.C_Str()] = original.C_Str();
             n->mName = original;
         }
@@ -45,7 +48,7 @@ void restoreOriginalNames(aiScene& scene)
     };
     walk(walk, scene.mRootNode);
     if (renamed.empty()) {
-        return;
+        return {};
     }
     auto fix = [&](aiString& s) {
         auto it = renamed.find(s.C_Str());
@@ -66,6 +69,41 @@ void restoreOriginalNames(aiScene& scene)
         for (unsigned c = 0; c < anim->mNumMorphMeshChannels; ++c) {
             fix(anim->mMorphMeshChannels[c]->mName);
         }
+    }
+    return {renamed.begin(), renamed.end()};
+}
+
+// A glTF mesh with several primitives becomes one aiMesh per primitive, named "name-0", "name-1", ...
+// That suffix is not part of the name. A COLLADA import keeps the geometry name on every piece.
+void undoGltfPrimitiveNames(aiScene& scene)
+{
+    auto walk = [&](auto& self, aiNode* n) -> void {
+        if (n->mNumMeshes > 1) {
+            const std::string first = scene.mMeshes[n->mMeshes[0]]->mName.C_Str();
+            const std::string suffix = "-0";
+            if (first.size() > suffix.size() && first.compare(first.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                const std::string base = first.substr(0, first.size() - suffix.size());
+                bool numbered = true;
+                for (unsigned i = 1; i < n->mNumMeshes; ++i) {
+                    const std::string name = scene.mMeshes[n->mMeshes[i]]->mName.C_Str();
+                    if (name != base + "-" + std::to_string(i)) {
+                        numbered = false;
+                        break;
+                    }
+                }
+                if (numbered) {
+                    for (unsigned i = 0; i < n->mNumMeshes; ++i) {
+                        scene.mMeshes[n->mMeshes[i]]->mName = base;
+                    }
+                }
+            }
+        }
+        for (unsigned i = 0; i < n->mNumChildren; ++i) {
+            self(self, n->mChildren[i]);
+        }
+    };
+    if (scene.mRootNode) {
+        walk(walk, scene.mRootNode);
     }
 }
 
@@ -278,7 +316,10 @@ bool Model::load(const std::string& path, std::string& error, std::vector<std::s
         error = "empty scene";
         return false;
     }
-    restoreOriginalNames(*loadedScene);
+    restored = restoreOriginalNames(*loadedScene);
+    if (ext == ".glb" || ext == ".gltf") {
+        undoGltfPrimitiveNames(*loadedScene);
+    }
     compactChannels(*loadedScene);
     if (mergeAnimations) {
         mergeIntoAmbient(*loadedScene);
@@ -286,7 +327,7 @@ bool Model::load(const std::string& path, std::string& error, std::vector<std::s
     if (collada) {
         if (up != UpAxis::Z) {
             loadedScene->mRootNode->mTransformation = colladaUpToZUp(up) * loadedScene->mRootNode->mTransformation;
-            warnings.push_back(format("COLLADA %s converted to Z-up like the game", up == UpAxis::Y ? "Y_UP" : "X_UP"));
+            warnings.push_back(format(tr("gdc.model.note.colladaUp"), up == UpAxis::Y ? "Y" : "X"));
         }
         upNote = format("%s-up (<up_axis>) -> Z-up", upAxisName(up));
     } else {

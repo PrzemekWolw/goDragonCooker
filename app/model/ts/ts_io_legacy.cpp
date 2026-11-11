@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 
+#include "core/i18n.h"
 #include "core/strings.h"
 #include "model/ts/ts_io.h"
 
@@ -610,7 +611,7 @@ void LegacyReader::fixupOldSkins(int numMeshes, const std::vector<Mesh>& skinsIn
             ++numSkinObjects;
         }
         if (skinsUsed == usedBefore) {
-            warn("old-style skins not reachable from any detail were dropped");
+            warn(tr("gdc.model.note.oldSkin"));
             break;
         }
     }
@@ -779,10 +780,10 @@ bool LegacyReader::assemble()
         meshes.push_back(std::move(m));
     }
     if (decals) {
-        warn(format("%d decal mesh(es) dropped (deprecated in the engine)", decals));
+        warn(format(tr("gdc.model.note.decals"), decals));
     }
     if (sorted) {
-        warn(format("%d sorted mesh(es) converted to standard meshes", sorted));
+        warn(format(tr("gdc.model.note.sorted"), sorted));
     }
     in.checkGuard("meshes");
 
@@ -1083,18 +1084,18 @@ std::vector<std::string> dtsVersionLosses(int version)
 {
     std::vector<std::string> out;
     if (version < 29) {
-        out.push_back("no object-name header (engine must parse the whole file to list objects)");
+        out.push_back(tr("gdc.model.dtsLoss.names"));
     }
     if (version < 28) {
-        out.push_back("tangents are not stored (the engine regenerates them)");
+        out.push_back(tr("gdc.model.dtsLoss.tangents"));
     }
     if (version < 26) {
-        out.push_back("second UV set and vertex colors are dropped");
-        out.push_back("primitives and indices are 16-bit (meshes need < 65536 vertices)");
-        out.push_back("autobillboard settings are packed into objectDetailNum");
+        out.push_back(tr("gdc.model.dtsLoss.uvColor"));
+        out.push_back(tr("gdc.model.dtsLoss.bigMesh"));
+        out.push_back(tr("gdc.model.dtsLoss.billboard"));
     }
     if (version == 25) {
-        out.push_back("material list carries an unused lightmap array (v25 layout)");
+        out.push_back(tr("gdc.model.dtsLoss.lightmap"));
     }
     return out;
 }
@@ -1202,16 +1203,18 @@ bool writeDts(const Shape& shapeIn, int V, std::vector<uint8_t>& data, std::stri
                 auto fit = [&](int32_t v, int32_t maxV, const char* what) {
                     if (v < 0 || v > maxV) {
                         if (warnings) {
-                            warnings->push_back(format("v%d: billboard %s %d clamped to %d", V, what, v, maxV));
+                            warnings->push_back(format(tr("gdc.model.note.billboard"), what, v, maxV));
                         }
                         return uint32_t(std::clamp(v, 0, maxV));
                     }
                     return uint32_t(v);
                 };
                 const int32_t angleSteps = int32_t(std::lround(d.bbPolarAngle / (0.5f * 3.14159265f / 64.0f)));
-                d.objectDetailNum = int32_t(fit(d.bbEquatorSteps, 0x7F, "equator steps") | (fit(d.bbPolarSteps, 0x3F, "polar steps") << 7) |
-                                            (fit(angleSteps, 0x3F, "polar angle") << 13) | (fit(d.bbDetailLevel, 0x0F, "detail level") << 19) |
-                                            (fit(d.bbDimension, 0xFF, "dimension") << 23) | (d.bbIncludePoles ? 0x80000000u : 0u));
+                d.objectDetailNum = int32_t(fit(d.bbEquatorSteps, 0x7F, tr("gdc.model.note.bbEquator")) |
+                                            (fit(d.bbPolarSteps, 0x3F, tr("gdc.model.note.bbPolar")) << 7) |
+                                            (fit(angleSteps, 0x3F, tr("gdc.model.note.bbAngle")) << 13) |
+                                            (fit(d.bbDetailLevel, 0x0F, tr("gdc.model.note.bbDetail")) << 19) |
+                                            (fit(d.bbDimension, 0xFF, tr("gdc.model.note.bbSize")) << 23) | (d.bbIncludePoles ? 0x80000000u : 0u));
             }
             out.put32(&d, 7);
         }
@@ -1248,11 +1251,11 @@ bool writeDts(const Shape& shapeIn, int V, std::vector<uint8_t>& data, std::stri
     out.setGuard();
 
     if (tooMany) {
-        error = format("DTS v%d stores 16-bit indices; %zu value(s) exceed 65535 (write v26 or newer)", V, tooMany);
+        error = format(tr("gdc.model.err.dtsIndex"), V, tooMany);
         return false;
     }
     if (warnings && droppedExtras) {
-        warnings->push_back(format("v%d: UV2/vertex colors dropped on %zu mesh(es)", V, droppedExtras));
+        warnings->push_back(format(tr("gdc.model.note.droppedExtras"), V, droppedExtras));
     }
 
     size_t size32 = out.b32.size();

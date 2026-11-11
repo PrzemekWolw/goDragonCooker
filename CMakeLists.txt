@@ -224,6 +224,25 @@ gdc_target_options(gdc_core)
 target_link_libraries(gdc_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads ${CMAKE_DL_LIBS})
 target_include_directories(gdc_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
+# OpenEXR reads normal maps, including DWAA. Same pin as app/native/vulkan.
+# Force the vendored copies: a system Imath/libdeflate from another toolchain
+# (for example MSYS2) is not linkable from this build.
+set(OPENEXR_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(OPENEXR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(OPENEXR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(OPENEXR_INSTALL OFF CACHE BOOL "" FORCE)
+set(OPENEXR_INSTALL_TOOLS OFF CACHE BOOL "" FORCE)
+set(OPENEXR_FORCE_INTERNAL_IMATH ON CACHE BOOL "" FORCE)
+set(OPENEXR_FORCE_INTERNAL_DEFLATE ON CACHE BOOL "" FORCE)
+set(OPENEXR_FORCE_INTERNAL_OPENJPH ON CACHE BOOL "" FORCE)
+unset(Imath_FOUND CACHE)
+unset(Imath_DIR CACHE)
+FetchContent_Declare(
+    openexr
+    URL https://github.com/AcademySoftwareFoundation/openexr/archive/refs/tags/v3.4.14.tar.gz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_MakeAvailable(openexr)
+
 # Texture codecs (texconv, Compressonator Vulkan) and cook rules.
 add_library(gdc_texture STATIC
     app/texture/imageheader.cpp
@@ -231,9 +250,10 @@ add_library(gdc_texture STATIC
     app/texture/vulkan_codec.cpp
     app/texture/cook_rules.cpp
     app/texture/cook_validate.cpp
-    app/texture/cook_retry.cpp)
+    app/texture/cook_retry.cpp
+    app/texture/normal_space.cpp)
 gdc_target_options(gdc_texture)
-target_link_libraries(gdc_texture PUBLIC gdc_core PRIVATE gdc_headers)
+target_link_libraries(gdc_texture PUBLIC gdc_core PRIVATE gdc_headers OpenEXR::OpenEXR)
 
 # TSShape IO (DTS/CDAE), Assimp bridge, format registry, validation.
 file(GLOB_RECURSE GDC_MODEL_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/app/model/*.cpp")

@@ -4,10 +4,11 @@
 
 namespace model {
 
-// The Assimp glTF exporter always writes the scene root as node 0. When that node is an empty, untransformed
-// container that is the scene's only root (and not a base*/start* detail node, or a node a skin or animation
-// targets), rewrites the glTF 2.0 file (.glb or .gltf) in place so its children are the scene's root nodes,
-// like Blender writes them.
+// Rewrites a written glTF 2.0 file (.glb or .gltf) in place. Drops Assimp's empty scene root when node 0 is an
+// untransformed container that is the scene's only root (and not a base*/start* detail node, or a node a skin
+// or animation targets), so its children are the scene roots, like Blender writes them. Also writes a node's
+// original name back from extras.gdc_name: the exporter shares one id for materials, meshes and nodes and
+// renames a clash "name_node", and the game looks the mesh up by that node name.
 bool gltfDropEmptyRoot(const std::string& path, std::string& error);
 
 } // namespace model

@@ -16,6 +16,7 @@
 #include "core/task.h"
 #include "imgui.h"
 #include "imgui_stdlib.h"
+#include "ui/icons.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 
@@ -520,7 +521,9 @@ static bool renderPatternRow(const PatternInfo& info)
         }
         const std::string id = stage + "_" + std::to_string(index);
         patternEditRow(id, buf);
-        if (ImGui::Button(trId("gdc.matgen.save", "upd_" + id).c_str())) {
+        const bool save = iconButton(ICON_SAVE, ("upd_" + id).c_str());
+        tooltip("gdc.matgen.save");
+        if (save) {
             const std::string suffix = trim(buf.suffix);
             if (!suffix.empty()) {
                 custom[index] = {suffix, allExtOpts[buf.extIdx], stage};
@@ -529,7 +532,9 @@ static bool renderPatternRow(const PatternInfo& info)
             }
         }
         ImGui::SameLine();
-        if (ImGui::Button(trId("gdc.matgen.remove", "rem_" + id).c_str())) {
+        const bool remove = iconButton(ICON_DELETE, ("rem_" + id).c_str());
+        tooltip("gdc.matgen.remove");
+        if (remove) {
             custom.erase(custom.begin() + std::ptrdiff_t(index));
             for (auto it = m.patternBufs.begin(); it != m.patternBufs.end();) {
                 it = hasPrefix(it->first, stage + "#") ? m.patternBufs.erase(it) : std::next(it);
@@ -546,7 +551,7 @@ static bool renderPatternRow(const PatternInfo& info)
         draft.extIdx = info.extIdx;
     }
     patternEditRow(stage + "_ext", draft);
-    if (ImGui::Button(trId("gdc.matgen.addPattern", "add_" + stage).c_str())) {
+    if (ImGui::Button(iconLabel(ICON_ADD, "gdc.matgen.addPattern", "add_" + stage).c_str())) {
         const std::string suffix = trim(draft.suffix);
         if (!suffix.empty()) {
             custom.push_back({suffix, allExtOpts[draft.extIdx], stage});
@@ -569,9 +574,10 @@ void matGenTabUI()
     ImGui::TextUnformatted(tr("gdc.common.texturesDirectory"));
     bool dirty = ImGui::InputText("##matgen_directory", &m.directory);
     ImGui::SameLine();
-    if (ImGui::Button(trId("gdc.common.browse", "matgen_browse").c_str())) {
+    if (iconButton(ICON_FOLDER_OPEN, "matgen_browse")) {
         openDirPicker(&m.directory);
     }
+    tooltip("gdc.common.browse");
 
     ImGui::Separator();
 
@@ -640,10 +646,11 @@ void matGenTabUI()
         logLines = m.task.logLines;
     }
     if (running) {
-        if (ImGui::Button(trId("gdc.matgen.stopGenerator", "matgen_run").c_str())) {
+        if (ImGui::Button(iconLabel(ICON_STOP, "gdc.matgen.stopGenerator", "matgen_run").c_str())) {
             m.task.stop = true;
         }
-    } else if (ImGui::Button(trId("gdc.matgen.generateMaterials", "matgen_run").c_str()) && !m.directory.empty()) {
+    } else if (ImGui::Button(iconLabel(ICON_PLAY_ARROW, "gdc.matgen.generateMaterials", "matgen_run").c_str()) &&
+               !m.directory.empty()) {
         m.task.log("");
         std::thread(runMatGen, m.directory, s).detach();
     }
@@ -651,11 +658,10 @@ void matGenTabUI()
     ImGui::Text(tr("gdc.common.status"), status.empty() ? tr("gdc.common.waiting") : status.c_str());
 
     ImGui::Separator();
-    ImGui::TextUnformatted(tr("gdc.common.output"));
     logView("##matgen_log", logLines, 0, [](const std::string& line) {
         const std::string lower = toLower(line);
         const bool isError = lower.find("error") != std::string::npos || lower.find("fail") != std::string::npos;
-        return isError ? colCookErr : colText;
+        return isError ? LogLevel::Error : LogLevel::Info;
     });
     ImGui::EndTabItem();
 }

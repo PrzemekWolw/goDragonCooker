@@ -30,6 +30,9 @@ public:
     const std::string& path() const { return sourcePath; }
     // "Y-up (.glb) -> Z-up": the frame the file was read in and what it was converted to (game space).
     const std::string& upAxisNote() const { return upNote; }
+    // Names the file stores that load() had to change back (stored name, real name). A reader that ignores the
+    // file's extras, such as the game or Blender, sees the stored name.
+    const std::vector<std::pair<std::string, std::string>>& restoredNames() const { return restored; }
 
     const ts::Shape* shape(const ts::AiToTsOptions& options, std::vector<std::string>& warnings, std::string& error);
     const aiScene* scene(const ts::TsToAiOptions& options, std::vector<std::string>& warnings);
@@ -38,6 +41,7 @@ private:
     std::string sourcePath;
     bool fromTs = false;
     std::string upNote;
+    std::vector<std::pair<std::string, std::string>> restored;
 
     std::optional<ts::Shape> loadedShape;
     std::unique_ptr<aiScene> loadedScene;

@@ -1,6 +1,7 @@
 #include "tabs/tabs.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <thread>
 
@@ -15,8 +16,10 @@
 #include "texture/cook_retry.h"
 #include "texture/cook_rules.h"
 #include "texture/cook_validate.h"
+#include "texture/normal_space.h"
 #include "texture/texconv.h"
 #include "texture/vulkan_codec.h"
+#include "ui/icons.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 
@@ -33,6 +36,7 @@ struct CookTab {
     TaskState task;
     std::string directory;
     bool autoDetectFmt = false;
+    bool fixNormalSpace = true;
     CookValidation validation;
 };
 
@@ -64,7 +68,39 @@ CookCheck checkCook(const CookJob& job, const CookValidation& v, bool firstWasTe
     return c;
 }
 
-void runCooker(std::string directory, bool autoDetectFmt, CookValidation validation)
+// Rewrites a normal map whose bytes are sRGB or double-linear into a temporary linear BMP.
+// The DDS still lands beside the original. Empty when the file is already linear or not a normal map.
+std::string correctNormalSpace(CookJob& job)
+{
+    const NormalEncoding encoding = detectNormalEncoding(job.srcFile);
+    if (encoding != NormalEncoding::Srgb && encoding != NormalEncoding::DoubleLinear) {
+        return "";
+    }
+    const char* stored = normalEncodingName(encoding);
+    const int neutral = encoding == NormalEncoding::Srgb ? 188 : 55;
+    const std::string name = baseName(job.srcFile);
+
+    static std::atomic<unsigned> seq{0};
+    std::error_code ec;
+    const fs::path dir = fs::temp_directory_path(ec) / "goDragonCooker_normal" / std::to_string(seq++);
+    fs::create_directories(dir, ec);
+    if (ec) {
+        return format(tr("gdc.cook.normalColorSpaceFailed"), name.c_str(), stored, ec.message().c_str());
+    }
+    const std::string original = job.srcFile;
+    std::string error;
+    const fs::path corrected = dir / (u8str(u8path(original).stem()) + ".bmp");
+    if (linearizeNormalMap(original, encoding, u8str(corrected), error).empty()) {
+        fs::remove_all(dir, ec);
+        return format(tr("gdc.cook.normalColorSpaceFailed"), name.c_str(), stored, error.c_str());
+    }
+    job.outputDir = u8str(u8path(original).parent_path());
+    job.cleanupDir = u8str(dir);
+    job.srcFile = u8str(corrected);
+    return format(tr("gdc.cook.normalColorSpace"), name.c_str(), stored, neutral);
+}
+
+void runCooker(std::string directory, bool autoDetectFmt, bool fixNormalSpace, CookValidation validation)
 {
     TaskState& tab = cookTab.task;
     tab.begin(tr("gdc.cook.seekingFiles"));
@@ -80,6 +116,18 @@ void runCooker(std::string directory, bool autoDetectFmt, CookValidation validat
     tab.log(tr("gdc.cook.seekingFiles"));
 
     std::vector<CookJob> jobs;
+    struct TempCleanup {
+        const std::vector<CookJob>& jobs;
+        ~TempCleanup()
+        {
+            std::error_code ec;
+            for (const CookJob& job : jobs) {
+                if (!job.cleanupDir.empty()) {
+                    fs::remove_all(u8path(job.cleanupDir), ec);
+                }
+            }
+        }
+    } tempCleanup{jobs};
     std::error_code ec;
     const fs::path root = u8path(directory);
     if (!fs::is_directory(root, ec)) {
@@ -110,12 +158,18 @@ void runCooker(std::string directory, bool autoDetectFmt, CookValidation validat
             continue;
         }
 
-        CookJob job;
-        makeCookJob(u8str(path), role, img, autoDetectFmt, job);
-
         fs::path dds = path;
         if (fs::exists(dds.replace_extension(".dds"), ec)) {
             continue;
+        }
+
+        CookJob job;
+        makeCookJob(u8str(path), role, img, autoDetectFmt, job);
+        if (role == "normal" && fixNormalSpace) {
+            const std::string note = correctNormalSpace(job);
+            if (!note.empty()) {
+                tab.log(note);
+            }
         }
         jobs.push_back(job);
         tab.log(format(tr("gdc.cook.queue"), name.c_str(), job.format.c_str(), colorSpaceName(img.colorSpace)));
@@ -357,25 +411,25 @@ void gpuControlsUI()
     ImGui::PopStyleColor();
 }
 
-ImVec4 cookLogColor(const std::string& line)
+LogLevel cookLogLevel(const std::string& line)
 {
     const std::string lower = toLower(line);
     if (hasPrefix(lower, "  ok:")) {
-        return colCookOk;
+        return LogLevel::Ok;
     }
     if (hasPrefix(lower, "  fail:") || hasPrefix(lower, "error")) {
-        return colCookErr;
+        return LogLevel::Error;
     }
     if (hasPrefix(lower, "  warn:")) {
-        return colWarn;
+        return LogLevel::Warn;
     }
     if (hasPrefix(lower, "    retry")) {
-        return colTextDim;
+        return LogLevel::Detail;
     }
     if (hasPrefix(lower, "  skip:")) {
-        return colTextDim;
+        return LogLevel::Detail;
     }
-    return colText;
+    return LogLevel::Info;
 }
 
 } // namespace
@@ -391,6 +445,7 @@ void cookTabInit()
             CookValidation& v = cookTab.validation;
             cookTab.directory = s.value("directory", "");
             cookTab.autoDetectFmt = s.value("assumeGrayscale", false);
+            cookTab.fixNormalSpace = s.value("fixNormalColorSpace", true);
             v.validate = s.value("validate", v.validate);
             v.retry = s.value("retry", v.retry);
             v.thresholds.bc7 = s.value("targetBC7", v.thresholds.bc7);
@@ -401,6 +456,7 @@ void cookTabInit()
             const CookValidation& v = cookTab.validation;
             j["cook"] = {{"directory", cookTab.directory},
                          {"assumeGrayscale", cookTab.autoDetectFmt},
+                         {"fixNormalColorSpace", cookTab.fixNormalSpace},
                          {"validate", v.validate},
                          {"retry", v.retry},
                          {"targetBC7", v.thresholds.bc7},
@@ -448,13 +504,16 @@ void cookTabUI()
     ImGui::TextUnformatted(tr("gdc.common.texturesDirectory"));
     bool dirty = ImGui::InputText("##cook_directory", &c.directory);
     ImGui::SameLine();
-    if (ImGui::Button(trId("gdc.common.browse", "cook_browse").c_str())) {
+    if (iconButton(ICON_FOLDER_OPEN, "cook_browse")) {
         openDirPicker(&c.directory);
     }
+    tooltip("gdc.common.browse");
 
     ImGui::Separator();
     dirty |= ImGui::Checkbox(trId("gdc.cook.assumeDataTexturesAreGrayscale", "cook_auto_fmt").c_str(), &c.autoDetectFmt);
     tooltip("gdc.cook.assumeDataTexturesAreGrayscale.tooltip");
+    dirty |= ImGui::Checkbox(trId("gdc.cook.fixNormalColorSpace", "cook_normal_space").c_str(), &c.fixNormalSpace);
+    tooltip("gdc.cook.fixNormalColorSpace.tooltip");
     if (dirty) {
         saveSettings();
     }
@@ -471,18 +530,18 @@ void cookTabUI()
         logLines = c.task.logLines;
     }
     if (running) {
-        if (ImGui::Button(trId("gdc.cook.stopCooker", "cook_run").c_str())) {
+        if (ImGui::Button(iconLabel(ICON_STOP, "gdc.cook.stopCooker", "cook_run").c_str())) {
             c.task.stop = true;
         }
-    } else if (ImGui::Button(trId("gdc.cook.runTextureCooker", "cook_run").c_str()) && !c.directory.empty()) {
+    } else if (ImGui::Button(iconLabel(ICON_PLAY_ARROW, "gdc.cook.runTextureCooker", "cook_run").c_str()) &&
+               !c.directory.empty()) {
         c.task.log("");
-        std::thread(runCooker, c.directory, c.autoDetectFmt, c.validation).detach();
+        std::thread(runCooker, c.directory, c.autoDetectFmt, c.fixNormalSpace, c.validation).detach();
     }
     ImGui::Text(tr("gdc.common.status"), status.empty() ? tr("gdc.common.waiting") : status.c_str());
 
     ImGui::Separator();
-    ImGui::TextUnformatted(tr("gdc.common.output"));
-    logView("##cook_log", logLines, 280, cookLogColor);
+    logView("##cook_log", logLines, 280, cookLogLevel);
 
     gpuControlsUI();
     ImGui::EndTabItem();

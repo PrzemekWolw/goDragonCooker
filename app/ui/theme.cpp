@@ -154,19 +154,39 @@ void applyTheme(float scale)
     style.FontScaleDpi = scale;
 }
 
-void loadFont()
+static fs::path findFont(const char* name)
 {
     const fs::path candidates[] = {
-        exeDir() / "fonts" / "OpenSans-Regular.ttf",
-        fs::path("app/fonts/OpenSans-Regular.ttf"),
-        fs::path("fonts/OpenSans-Regular.ttf"),
+        exeDir() / "fonts" / name,
+        fs::path("app/fonts") / name,
+        fs::path("fonts") / name,
     };
     for (const fs::path& path : candidates) {
         std::error_code ec;
-        if (!fs::is_regular_file(path, ec)) {
-            continue;
+        if (fs::is_regular_file(path, ec)) {
+            return path;
         }
-        ImGui::GetIO().Fonts->AddFontFromFileTTF(u8str(path).c_str(), 18.7f);
+    }
+    return {};
+}
+
+void loadFont()
+{
+    const fs::path text = findFont("OpenSans-Regular.ttf");
+    if (text.empty()) {
         return;
     }
+    ImFontAtlas* atlas = ImGui::GetIO().Fonts;
+    atlas->AddFontFromFileTTF(u8str(text).c_str(), 18.7f);
+
+    const fs::path icons = findFont("MaterialIcons-Regular.ttf");
+    if (icons.empty()) {
+        return;
+    }
+    // Material Icons sit on the baseline with no descent; shift them down to center on the text.
+    ImFontConfig config;
+    config.MergeMode = true;
+    config.GlyphMinAdvanceX = 18.7f;
+    config.GlyphOffset = ImVec2(0, 4.0f);
+    atlas->AddFontFromFileTTF(u8str(icons).c_str(), 18.7f, &config);
 }

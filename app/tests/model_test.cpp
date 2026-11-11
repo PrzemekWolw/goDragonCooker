@@ -367,6 +367,32 @@ void axisFile(const std::string& path)
     }
 }
 
+bool namesOnly = false;
+
+// Checks an existing file for part names stored under another name, and repeated material names.
+void namesFile(const std::string& path)
+{
+    model::Model m;
+    std::string error;
+    std::vector<std::string> warnings, ignored;
+    if (!m.load(path, error, warnings) || m.isTs()) {
+        std::printf("%s: %s\n", path.c_str(), m.isTs() ? "not an Assimp format" : error.c_str());
+        ++failures;
+        return;
+    }
+    model::ValidationReport rep;
+    const std::string ext = model::modelExtension(path);
+    model::checkStoredNames(rep, m.restoredNames(), *m.scene({}, ignored));
+    model::checkImportNames(rep, *m.scene({}, ignored), ext == ".glb" || ext == ".gltf");
+    std::printf("%s (%s)\n", path.c_str(), model::verdictName(rep.verdict));
+    for (const std::string& line : rep.lines) {
+        std::printf("      %s\n", line.c_str());
+    }
+    if (rep.verdict == model::Verdict::Fail) {
+        ++failures;
+    }
+}
+
 // Per-material triangle counts of the model as the validator sees it.
 void dumpFile(const std::string& path)
 {
@@ -411,6 +437,10 @@ void testFile(const std::string& path)
     }
     if (dumpOnly) {
         dumpFile(path);
+        return;
+    }
+    if (namesOnly) {
+        namesFile(path);
         return;
     }
     const std::string ext = model::modelExtension(path);
@@ -476,6 +506,8 @@ int main(int argc, char** argv)
             outDir = argv[++i];
         } else if (std::strcmp(argv[i], "--dump") == 0) {
             dumpOnly = true;
+        } else if (std::strcmp(argv[i], "--names") == 0) {
+            namesOnly = true;
         } else if (std::strcmp(argv[i], "--axis") == 0 && i + 1 < argc) {
             axisOnly = true;
             axisExpected = argv[++i][0] == 'Z' ? model::UpAxis::Z : model::UpAxis::Y;

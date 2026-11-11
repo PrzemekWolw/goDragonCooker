@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include "core/platform.h"
+#include "model/model.h"
 #include "model/ts/ts_io.h"
 
 namespace model {
@@ -116,6 +117,32 @@ void dropRoot(json& g)
     g["scenes"][0]["nodes"] = children;
 }
 
+// The exporter's id has to be unique, so a node that shares a name with a material or a mesh is written
+// "name_node". glTF names do not have to be unique, and the game addresses the mesh by the node name.
+bool restoreNodeNames(json& g)
+{
+    if (!g.contains("nodes") || !g["nodes"].is_array()) {
+        return false;
+    }
+    bool changed = false;
+    for (json& node : g["nodes"]) {
+        if (!node.is_object()) {
+            continue;
+        }
+        const json extras = node.value("extras", json::object());
+        if (!extras.is_object() || !extras.contains(kOriginalNameKey) || !extras[kOriginalNameKey].is_string()) {
+            continue;
+        }
+        const std::string original = extras[kOriginalNameKey].get<std::string>();
+        if (original.empty() || node.value("name", std::string()) == original) {
+            continue;
+        }
+        node["name"] = original;
+        changed = true;
+    }
+    return changed;
+}
+
 } // namespace
 
 bool gltfDropEmptyRoot(const std::string& path, std::string& error)
@@ -143,10 +170,14 @@ bool gltfDropEmptyRoot(const std::string& path, std::string& error)
         error = "invalid glTF JSON";
         return false;
     }
-    if (!isEmptyRoot(g)) {
+    const bool dropped = isEmptyRoot(g);
+    if (dropped) {
+        dropRoot(g);
+    }
+    const bool renamed = restoreNodeNames(g);
+    if (!dropped && !renamed) {
         return true;
     }
-    dropRoot(g);
     text = g.dump();
     if (!glb) {
         return ts::writeFileBytes(path, std::vector<uint8_t>(text.begin(), text.end()), error);
