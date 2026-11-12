@@ -282,7 +282,7 @@ index 28416459a..649b9c4e6 100644
          }
  
 diff --git a/code/AssetLib/X/XFileExporter.cpp b/code/AssetLib/X/XFileExporter.cpp
-index 0fa670479..bca1eb507 100644
+index 0fa670479..c54229abf 100644
 --- a/code/AssetLib/X/XFileExporter.cpp
 +++ b/code/AssetLib/X/XFileExporter.cpp
 @@ -57,6 +57,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
@@ -293,7 +293,7 @@ index 0fa670479..bca1eb507 100644
  #include <ctime>
  #include <set>
  #include <memory>
-@@ -138,17 +139,8 @@ void XFileExporter::WriteFile()
+@@ -138,17 +139,48 @@ void XFileExporter::WriteFile()
      // entry of writing the file
      WriteHeader();
  
@@ -304,26 +304,97 @@ index 0fa670479..bca1eb507 100644
 -    WriteFrameTransform(I);
 -
 +    // The root is the single top frame, so readers get it back as their root node.
++    WriteMaterials();
      WriteNode(mScene->mRootNode);
 -    PopTag();
--
++}
+ 
 -    mOutput << startstr << "}" << endstr;
--
++// ------------------------------------------------------------------------------------------------
++void XFileExporter::WriteMaterials()
++{
++    std::set<std::string> written;
++    for (unsigned i = 0; i < mScene->mNumMaterials; ++i) {
++        const std::string token = materialToken(i);
++        if (token.empty() || !written.insert(token).second) {
++            continue;
++        }
++        const aiMaterial* mat = mScene->mMaterials[i];
++        mOutput << startstr << "Material " << token << " {" << endstr;
++        PushTag();
++        mOutput << startstr << "1.0; 1.0; 1.0; 1.000000;;" << endstr;
++        mOutput << startstr << "1.000000;" << endstr;
++        mOutput << startstr << "0.000000; 0.000000; 0.000000;;" << endstr;
++        mOutput << startstr << "0.000000; 0.000000; 0.000000;;" << endstr;
++        aiString relpath;
++        mat->Get(_AI_MATKEY_TEXTURE_BASE, aiTextureType_DIFFUSE, 0, relpath);
++        if (relpath.length) {
++            mOutput << startstr << "TextureFilename { \"";
++            writePath(relpath);
++            mOutput << "\"; }" << endstr;
++        }
++        PopTag();
++        mOutput << startstr << "}" << endstr;
++    }
++}
+ 
++// ------------------------------------------------------------------------------------------------
++std::string XFileExporter::materialToken(unsigned index)
++{
++    if (!mScene || index >= mScene->mNumMaterials) {
++        return {};
++    }
++    aiString name;
++    mScene->mMaterials[index]->Get(AI_MATKEY_NAME, name);
++    return toXFileString(name);
  }
  
  // ------------------------------------------------------------------------------------------------
-@@ -391,7 +383,9 @@ void XFileExporter::WriteMesh(aiMesh* mesh)
+@@ -372,38 +404,21 @@ void XFileExporter::WriteMesh(aiMesh* mesh)
+ 
+     mOutput << endstr;
+ 
+-    if (mesh->HasTextureCoords(0))
+-    {
+-        const aiMaterial* mat = mScene->mMaterials[mesh->mMaterialIndex];
+-        aiString relpath;
+-        mat->Get(_AI_MATKEY_TEXTURE_BASE, aiTextureType_DIFFUSE, 0, relpath);
+-
++    const std::string token = materialToken(mesh->mMaterialIndex);
++    if (!token.empty()) {
+         mOutput << startstr << "MeshMaterialList {" << endstr;
+         PushTag();
+         mOutput << startstr << "1;" << endstr; // number of materials
+         mOutput << startstr << mesh->mNumFaces << ";" << endstr; // number of faces
+         mOutput << startstr;
+-        for( size_t a = 0; a < mesh->mNumFaces; ++a )
+-        {
++        for (size_t a = 0; a < mesh->mNumFaces; ++a) {
+             mOutput << "0"; // the material index
+-            if (a < mesh->mNumFaces - 1)
++            if (a + 1 < mesh->mNumFaces)
+                 mOutput << ", ";
              else
                  mOutput << ";" << endstr;
          }
 -        mOutput << startstr << "Material {" << endstr;
-+        aiString matName;
-+        mat->Get(AI_MATKEY_NAME, matName);
-+        mOutput << startstr << "Material " << toXFileString(matName) << " {" << endstr;
-         PushTag();
-         mOutput << startstr << "1.0; 1.0; 1.0; 1.000000;;" << endstr;
-         mOutput << startstr << "1.000000;" << endstr; // power
-@@ -416,8 +410,8 @@ void XFileExporter::WriteMesh(aiMesh* mesh)
+-        PushTag();
+-        mOutput << startstr << "1.0; 1.0; 1.0; 1.000000;;" << endstr;
+-        mOutput << startstr << "1.000000;" << endstr; // power
+-        mOutput << startstr << "0.000000; 0.000000; 0.000000;;" << endstr; // specularity
+-        mOutput << startstr << "0.000000; 0.000000; 0.000000;;" << endstr; // emission
+-        mOutput << startstr << "TextureFilename { \"";
+-
+-        writePath(relpath);
+-
+-        mOutput << "\"; }" << endstr;
+-        PopTag();
+-        mOutput << startstr << "}" << endstr;
++        mOutput << startstr << "{ " << token << " }" << endstr;
+         PopTag();
+         mOutput << startstr << "}" << endstr;
+     }
+@@ -416,8 +431,8 @@ void XFileExporter::WriteMesh(aiMesh* mesh)
          for (size_t a = 0; a < mesh->mNumVertices; a++)
          {
              aiVector3D &v = mesh->mNormals[a];
@@ -334,7 +405,7 @@ index 0fa670479..bca1eb507 100644
              if (a < mesh->mNumVertices - 1)
                  mOutput << "," << endstr;
              else
-@@ -512,9 +506,9 @@ std::string XFileExporter::toXFileString(aiString &name)
+@@ -512,9 +527,9 @@ std::string XFileExporter::toXFileString(aiString &name)
      std::string str = pref + std::string(name.C_Str());
      for (int i=0; i < (int) str.length(); ++i)
      {
@@ -347,6 +418,21 @@ index 0fa670479..bca1eb507 100644
              continue;
          str[i] = '_';
      }
+diff --git a/code/AssetLib/X/XFileExporter.h b/code/AssetLib/X/XFileExporter.h
+index c11fd1518..a8b06afaf 100644
+--- a/code/AssetLib/X/XFileExporter.h
++++ b/code/AssetLib/X/XFileExporter.h
+@@ -89,6 +89,10 @@ protected:
+     /// write a mesh entry of the scene
+     void WriteMesh( aiMesh* mesh);
+ 
++    void WriteMaterials();
++
++    std::string materialToken(unsigned index);
++
+     /// Enters a new xml element, which increases the indentation
+     void PushTag() { startstr.append( "  "); }
+ 
 diff --git a/code/AssetLib/X3D/X3DExporter.cpp b/code/AssetLib/X3D/X3DExporter.cpp
 index 0c5ed1268..b18b0340e 100644
 --- a/code/AssetLib/X3D/X3DExporter.cpp
