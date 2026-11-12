@@ -1,6 +1,7 @@
 #include "model/ts/ts_shape.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 #include "core/strings.h"
@@ -402,6 +403,62 @@ void convertToTriangles(Mesh& mesh)
     }
     mesh.primitives = std::move(prims);
     mesh.indices = std::move(indices);
+}
+
+bool groundMoves(const Shape& shape, const Sequence& seq)
+{
+    const int n = seq.numGroundFrames;
+    if (n <= 0) {
+        return false;
+    }
+    for (int i = 0; i < n; ++i) {
+        const size_t idx = size_t(seq.firstGroundFrame) + size_t(i);
+        if (idx < shape.groundTranslations.size()) {
+            const Vec3& p = shape.groundTranslations[idx];
+            if (std::fabs(p.x) > 1e-4f || std::fabs(p.y) > 1e-4f || std::fabs(p.z) > 1e-4f) {
+                return true;
+            }
+        }
+        if (idx < shape.groundRotations.size()) {
+            const Quat q = toQuat(shape.groundRotations[idx]);
+            if (std::fabs(q.x) > 1e-4f || std::fabs(q.y) > 1e-4f || std::fabs(q.z) > 1e-4f || std::fabs(q.w) < 0.9999f) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+Mat4 groundTransform(const Shape& shape, const Sequence& seq, float time)
+{
+    const int n = seq.numGroundFrames;
+    if (n <= 0) {
+        return {};
+    }
+    auto frame = [&](int i) {
+        i = std::clamp(i, 0, n - 1);
+        const size_t idx = size_t(seq.firstGroundFrame) + size_t(i);
+        const Vec3 p = idx < shape.groundTranslations.size() ? shape.groundTranslations[idx] : Vec3{};
+        const Quat q = idx < shape.groundRotations.size() ? toQuat(shape.groundRotations[idx]) : Quat{};
+        return composeTRS(p, q, {1, 1, 1});
+    };
+    if (n == 1 || seq.duration <= 0.0f) {
+        return frame(0);
+    }
+    const float u = std::clamp(time / seq.duration, 0.0f, 1.0f) * float(n - 1);
+    const int i0 = std::min(int(u), n - 1);
+    const int i1 = std::min(i0 + 1, n - 1);
+    const float f = u - float(i0);
+    if (f <= 0.0f || i0 == i1) {
+        return frame(i0);
+    }
+    const size_t a = size_t(seq.firstGroundFrame) + size_t(i0);
+    const size_t b = size_t(seq.firstGroundFrame) + size_t(i1);
+    const Vec3 p0 = a < shape.groundTranslations.size() ? shape.groundTranslations[a] : Vec3{};
+    const Vec3 p1 = b < shape.groundTranslations.size() ? shape.groundTranslations[b] : Vec3{};
+    const Quat q0 = a < shape.groundRotations.size() ? toQuat(shape.groundRotations[a]) : Quat{};
+    const Quat q1 = b < shape.groundRotations.size() ? toQuat(shape.groundRotations[b]) : Quat{};
+    return composeTRS(p0 + (p1 - p0) * f, slerp(q0, q1, f), {1, 1, 1});
 }
 
 } // namespace ts

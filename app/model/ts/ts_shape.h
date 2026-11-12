@@ -287,4 +287,8 @@ void primitiveTriangles(const Mesh& mesh, const Primitive& prim, std::vector<uin
 // Converts every primitive to an indexed triangle list in place.
 void convertToTriangles(Mesh& mesh);
 
+// Ground sample i is the bounds pose at time duration * i / (count - 1). Sample 0 is the pose at the start.
+bool groundMoves(const Shape& shape, const Sequence& seq);
+Mat4 groundTransform(const Shape& shape, const Sequence& seq, float time);
+
 } // namespace ts

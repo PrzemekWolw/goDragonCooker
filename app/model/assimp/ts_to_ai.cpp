@@ -343,49 +343,94 @@ struct Exporter {
         for (const Sequence& seq : shape.sequences) {
             const std::string seqName = shape.name(seq.nameIndex);
             const int K = std::max(1, seq.numKeyframes);
-            const double tps = seq.duration > 0 && K > 1 ? double(K - 1) / seq.duration : 30.0;
+            const bool moveGround = groundMoves(shape, seq);
+            const int M = moveGround ? std::max(K, std::max(seq.numGroundFrames, 1)) : K;
+            const double tps = seq.duration > 0 && M > 1 ? double(M - 1) / seq.duration : 30.0;
             aiAnimation* anim = new aiAnimation;
             anim->mName = aiString(seqName);
             anim->mTicksPerSecond = tps;
-            anim->mDuration = double(K - 1);
+            anim->mDuration = double(M - 1);
             std::vector<aiNodeAnim*> channels;
             const bool arbitrary = seq.has(SequenceFlag::ArbitraryScale);
             bool arbitraryRotated = false;
+            bool rooted = false;
+            auto poseAt = [&](int n, int f, bool r, bool t, bool s, int rr, int tr, int sr, Vec3& p, Quat& q, Vec3& sc) {
+                const Quat16 q16 = r ? shape.nodeRotations[size_t(seq.baseRotation) + size_t(rr) * K + f] : shape.defaultRotations[n];
+                p = t ? shape.nodeTranslations[size_t(seq.baseTranslation) + size_t(tr) * K + f] : shape.defaultTranslations[n];
+                sc = {1, 1, 1};
+                if (s) {
+                    const size_t i = size_t(seq.baseScale) + size_t(sr) * K + f;
+                    if (seq.has(SequenceFlag::UniformScale) && i < shape.nodeUniformScales.size()) {
+                        sc = {shape.nodeUniformScales[i], shape.nodeUniformScales[i], shape.nodeUniformScales[i]};
+                    } else if (seq.has(SequenceFlag::AlignedScale) && i < shape.nodeAlignedScales.size()) {
+                        sc = shape.nodeAlignedScales[i];
+                    } else if (arbitrary && i < shape.nodeArbitraryScaleFactors.size()) {
+                        sc = shape.nodeArbitraryScaleFactors[i];
+                        if (i < shape.nodeArbitraryScaleRots.size() && !(shape.nodeArbitraryScaleRots[i] == Quat16{})) {
+                            arbitraryRotated = true;
+                        }
+                    }
+                }
+                q = toQuat(q16);
+            };
+            if (arbitrary) {
+                for (int n = 0; n < int(shape.nodes.size()); ++n) {
+                    if (!seq.scaleMatters.test(n)) {
+                        continue;
+                    }
+                    const int sr = seq.scaleMatters.rank(n);
+                    for (int f = 0; f < K; ++f) {
+                        const size_t i = size_t(seq.baseScale) + size_t(sr) * K + f;
+                        if (i < shape.nodeArbitraryScaleRots.size() && !(shape.nodeArbitraryScaleRots[i] == Quat16{})) {
+                            arbitraryRotated = true;
+                        }
+                    }
+                }
+            }
             for (int n = 0; n < int(shape.nodes.size()); ++n) {
                 const bool r = seq.rotationMatters.test(n), t = seq.translationMatters.test(n), s = seq.scaleMatters.test(n);
-                if (!r && !t && !s) {
+                const int parent = shape.nodes[n].parentIndex;
+                const bool root = parent < 0 || parent >= int(shape.nodes.size());
+                rooted = rooted || root;
+                if (!r && !t && !s && !(moveGround && root)) {
                     continue;
                 }
                 aiNodeAnim* ch = new aiNodeAnim;
                 ch->mNodeName = aiString(shape.name(shape.nodes[n].nameIndex));
-                ch->mNumPositionKeys = ch->mNumRotationKeys = ch->mNumScalingKeys = unsigned(K);
-                ch->mPositionKeys = new aiVectorKey[K];
-                ch->mRotationKeys = new aiQuatKey[K];
-                ch->mScalingKeys = new aiVectorKey[K];
+                ch->mNumPositionKeys = ch->mNumRotationKeys = ch->mNumScalingKeys = unsigned(M);
+                ch->mPositionKeys = new aiVectorKey[M];
+                ch->mRotationKeys = new aiQuatKey[M];
+                ch->mScalingKeys = new aiVectorKey[M];
                 const int rr = seq.rotationMatters.rank(n), tr = seq.translationMatters.rank(n), sr = seq.scaleMatters.rank(n);
-                for (int f = 0; f < K; ++f) {
-                    const Quat16 q16 = r ? shape.nodeRotations[size_t(seq.baseRotation) + size_t(rr) * K + f] : shape.defaultRotations[n];
-                    const Vec3 p = t ? shape.nodeTranslations[size_t(seq.baseTranslation) + size_t(tr) * K + f] : shape.defaultTranslations[n];
-                    Vec3 sc{1, 1, 1};
-                    if (s) {
-                        const size_t i = size_t(seq.baseScale) + size_t(sr) * K + f;
-                        if (seq.has(SequenceFlag::UniformScale) && i < shape.nodeUniformScales.size()) {
-                            sc = {shape.nodeUniformScales[i], shape.nodeUniformScales[i], shape.nodeUniformScales[i]};
-                        } else if (seq.has(SequenceFlag::AlignedScale) && i < shape.nodeAlignedScales.size()) {
-                            sc = shape.nodeAlignedScales[i];
-                        } else if (arbitrary && i < shape.nodeArbitraryScaleFactors.size()) {
-                            sc = shape.nodeArbitraryScaleFactors[i];
-                            if (i < shape.nodeArbitraryScaleRots.size() && !(shape.nodeArbitraryScaleRots[i] == Quat16{})) {
-                                arbitraryRotated = true;
-                            }
-                        }
+                for (int frame = 0; frame < M; ++frame) {
+                    const float nodeU = M == K ? float(frame) : (M > 1 && K > 1 ? float(frame) * float(K - 1) / float(M - 1) : 0.0f);
+                    const float u = K <= 1 ? 0.0f : std::clamp(nodeU, 0.0f, float(K - 1));
+                    const int k0 = std::min(int(u), K - 1);
+                    const int k1 = std::min(k0 + 1, K - 1);
+                    const float blend = u - float(k0);
+                    Vec3 p, sc;
+                    Quat q;
+                    poseAt(n, k0, r, t, s, rr, tr, sr, p, q, sc);
+                    if (blend > 0.0f && k1 != k0) {
+                        Vec3 p1, sc1;
+                        Quat q1;
+                        poseAt(n, k1, r, t, s, rr, tr, sr, p1, q1, sc1);
+                        p = p + (p1 - p) * blend;
+                        sc = sc + (sc1 - sc) * blend;
+                        q = slerp(q, q1, blend);
                     }
-                    const Quat q = toQuat(q16);
-                    ch->mRotationKeys[f] = aiQuatKey(double(f), aiQuaternion(q.w, q.x, q.y, q.z));
-                    ch->mPositionKeys[f] = aiVectorKey(double(f), aiVector3D(p.x, p.y, p.z));
-                    ch->mScalingKeys[f] = aiVectorKey(double(f), aiVector3D(sc.x, sc.y, sc.z));
+                    if (moveGround && root) {
+                        const float time = M > 1 ? seq.duration * float(frame) / float(M - 1) : 0.0f;
+                        decompose(groundTransform(shape, seq, time) * composeTRS(p, q, sc), p, q, sc);
+                    }
+                    ch->mRotationKeys[frame] = aiQuatKey(double(frame), aiQuaternion(q.w, q.x, q.y, q.z));
+                    ch->mPositionKeys[frame] = aiVectorKey(double(frame), aiVector3D(p.x, p.y, p.z));
+                    ch->mScalingKeys[frame] = aiVectorKey(double(frame), aiVector3D(sc.x, sc.y, sc.z));
                 }
                 channels.push_back(ch);
+            }
+            if (moveGround && !rooted) {
+                warn(format(tr("gdc.model.note.ground"), seqName.c_str(), seq.numGroundFrames));
             }
             if (arbitraryRotated) {
                 warn(format(tr("gdc.model.note.scaleRot"), seqName.c_str()));
@@ -395,9 +440,6 @@ struct Exporter {
             }
             if (seq.matFrameMatters.any()) {
                 warn(format(tr("gdc.model.note.matAnim"), seqName.c_str()));
-            }
-            if (seq.numGroundFrames > 0) {
-                warn(format(tr("gdc.model.note.ground"), seqName.c_str(), seq.numGroundFrames));
             }
 
             std::vector<aiMeshMorphAnim*> morphs;
@@ -415,19 +457,21 @@ struct Exporter {
                         }
                         aiMeshMorphAnim* mc = new aiMeshMorphAnim;
                         mc->mName = aiString(nodeName);
-                        mc->mNumKeys = unsigned(K);
-                        mc->mKeys = new aiMeshMorphKey[K];
-                        for (int f = 0; f < K; ++f) {
-                            const size_t si = size_t(seq.baseObjectState) + size_t(stateRank) * K + f;
-                            const int frame = si < shape.objectStates.size() ? shape.objectStates[si].frameIndex : 0;
-                            aiMeshMorphKey& key = mc->mKeys[f];
-                            key.mTime = double(f);
+                        mc->mNumKeys = unsigned(M);
+                        mc->mKeys = new aiMeshMorphKey[M];
+                        for (int frame = 0; frame < M; ++frame) {
+                            const float nodeU = M == K ? float(frame) : (M > 1 && K > 1 ? float(frame) * float(K - 1) / float(M - 1) : 0.0f);
+                            const int src = K <= 1 ? 0 : std::min(int(std::clamp(nodeU, 0.0f, float(K - 1))), K - 1);
+                            const size_t si = size_t(seq.baseObjectState) + size_t(stateRank) * K + src;
+                            const int shapeFrame = si < shape.objectStates.size() ? shape.objectStates[si].frameIndex : 0;
+                            aiMeshMorphKey& key = mc->mKeys[frame];
+                            key.mTime = double(frame);
                             key.mNumValuesAndWeights = am->mNumAnimMeshes;
                             key.mValues = new unsigned[am->mNumAnimMeshes];
                             key.mWeights = new double[am->mNumAnimMeshes];
                             for (unsigned t = 0; t < am->mNumAnimMeshes; ++t) {
                                 key.mValues[t] = t;
-                                key.mWeights[t] = int(t) + 1 == frame ? 1.0 : 0.0;
+                                key.mWeights[t] = int(t) + 1 == shapeFrame ? 1.0 : 0.0;
                             }
                         }
                         morphs.push_back(mc);

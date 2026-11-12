@@ -255,13 +255,14 @@ Summary summarize(const Shape& shape, const DetailFilter& filter)
             const float pos = K > 1 ? float(smp) * float(K - 1) / float(kAnimSamples - 1) : 0.0f;
             const int k0 = std::min(int(pos), K - 1), k1 = std::min(k0 + 1, K - 1);
             const float f = pos - float(k0);
+            const Mat4 ground = groundTransform(shape, q, float(smp) * q.duration / float(kAnimSamples - 1));
             std::vector<Mat4> w(shape.nodes.size());
             for (size_t n = 0; n < shape.nodes.size(); ++n) {
                 const Quat r = slerp(seqRot(shape, q, int(n), k0), seqRot(shape, q, int(n), k1), f);
                 const Vec3 t0 = seqTrans(shape, q, int(n), k0), t1 = seqTrans(shape, q, int(n), k1);
                 const Mat4 local = composeTRS(t0 + (t1 - t0) * f, r, {1, 1, 1});
                 const int p = shape.nodes[n].parentIndex;
-                w[n] = p >= 0 && p < int(n) ? w[p] * local : local;
+                w[n] = p >= 0 && p < int(n) ? w[p] * local : ground * local;
                 perNode[n].push_back(w[n]);
             }
         }
