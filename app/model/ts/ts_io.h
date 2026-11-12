@@ -37,7 +37,4 @@ struct CdaeWriteOptions {
 constexpr size_t kCdaeAutoCompressBytes = 512u * 1024u;
 bool writeCdae(const Shape& shape, const CdaeWriteOptions& options, std::vector<uint8_t>& out, std::string& error, bool* compressed = nullptr);
 
-bool readFileBytes(const std::string& path, std::vector<uint8_t>& out, std::string& error);
-bool writeFileBytes(const std::string& path, const std::vector<uint8_t>& data, std::string& error);
-
 } // namespace ts

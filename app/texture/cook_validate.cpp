@@ -4,20 +4,11 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <fstream>
 
 #include "core/platform.h"
 #include "core/strings.h"
+#include "texture/image_load.h"
 #include "texture/imageheader.h"
-
-#define STB_IMAGE_IMPLEMENTATION
-#define STBI_FAILURE_USERMSG
-#define STBI_ONLY_PNG
-#define STBI_ONLY_JPEG
-#define STBI_ONLY_BMP
-#define STBI_ONLY_TGA
-#define STBI_ONLY_HDR
-#include "stb_image.h"
 
 #define BCDEC_IMPLEMENTATION
 #include "bcdec.h"
@@ -81,21 +72,6 @@ struct Image {
     uint8_t at(int x, int y, int c) const { return px[(size_t(y) * w + x) * ch + c]; }
 };
 
-bool readFile(const std::string& path, std::vector<uint8_t>& out)
-{
-    std::ifstream file(u8path(path), std::ios::binary | std::ios::ate);
-    if (!file) {
-        return false;
-    }
-    const std::streamsize size = file.tellg();
-    if (size <= 0) {
-        return false;
-    }
-    out.resize(size_t(size));
-    file.seekg(0);
-    return bool(file.read(reinterpret_cast<char*>(out.data()), size));
-}
-
 bool isPow2(int v)
 {
     return v > 0 && (v & (v - 1)) == 0;
@@ -155,36 +131,12 @@ bool decodeTop(const uint8_t* data, size_t size, const DxgiInfo& f, int w, int h
 
 bool loadSource(const std::string& path, Image& img, std::string& error)
 {
-    std::vector<uint8_t> bytes;
-    if (!readFile(path, bytes)) {
-        error = "cannot read source";
+    Rgba8 rgba;
+    if (!loadRgba8(path, rgba, error)) {
+        error = "cannot decode source: " + error;
         return false;
     }
-    int w = 0, h = 0, n = 0;
-    const int len = int(std::min<size_t>(bytes.size(), INT32_MAX));
-    if (imageFormat(path) == "hdr") {
-        float* f = stbi_loadf_from_memory(bytes.data(), len, &w, &h, &n, 4);
-        if (!f) {
-            error = std::string("cannot decode source: ") + stbi_failure_reason();
-            return false;
-        }
-        img.px.resize(size_t(w) * h * 4);
-        for (size_t i = 0; i < img.px.size(); ++i) {
-            img.px[i] = uint8_t(std::clamp(f[i], 0.0f, 1.0f) * 255.0f + 0.5f);
-        }
-        stbi_image_free(f);
-    } else {
-        uint8_t* p = stbi_load_from_memory(bytes.data(), len, &w, &h, &n, 4);
-        if (!p) {
-            error = std::string("cannot decode source: ") + stbi_failure_reason();
-            return false;
-        }
-        img.px.assign(p, p + size_t(w) * h * 4);
-        stbi_image_free(p);
-    }
-    img.w = w;
-    img.h = h;
-    img.ch = 4;
+    img = {rgba.w, rgba.h, 4, std::move(rgba.px)};
     return true;
 }
 
@@ -251,9 +203,7 @@ void linearToSRGB(Image& img)
 {
     uint8_t lut[256];
     for (int i = 0; i < 256; ++i) {
-        const double v = i / 255.0;
-        const double s = v <= 0.0031308 ? v * 12.92 : 1.055 * std::pow(v, 1 / 2.4) - 0.055;
-        lut[i] = uint8_t(std::clamp(s * 255 + 0.5, 0.0, 255.0));
+        lut[i] = linearToSrgb(uint8_t(i));
     }
     for (size_t i = 0; i < img.px.size(); i += 4) {
         for (int c = 0; c < 3; ++c) {
@@ -436,7 +386,8 @@ CookQuality validateCook(const CookJob& job, const std::string& ddsPath, const C
     q.lowQuality = true;
 
     std::vector<uint8_t> dds;
-    if (!readFile(ddsPath, dds)) {
+    std::string readError;
+    if (!readFileBytes(ddsPath, dds, readError)) {
         q.error = "cannot read the DDS";
         return q;
     }

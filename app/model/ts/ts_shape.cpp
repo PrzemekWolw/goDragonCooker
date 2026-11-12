@@ -1,18 +1,11 @@
 #include "model/ts/ts_shape.h"
 
 #include <algorithm>
-#include <cctype>
 #include <limits>
 
-namespace ts {
+#include "core/strings.h"
 
-std::string lowerAscii(std::string s)
-{
-    for (char& c : s) {
-        c = char(std::tolower((unsigned char)c));
-    }
-    return s;
-}
+namespace ts {
 
 bool IntegerSet::test(int i) const
 {
@@ -33,14 +26,6 @@ void IntegerSet::set(int i)
         words.resize(w + 1, 0);
     }
     words[w] |= 1u << (i & 31);
-}
-
-void IntegerSet::clear(int i)
-{
-    const size_t w = size_t(i) >> 5;
-    if (i >= 0 && w < words.size()) {
-        words[w] &= ~(1u << (i & 31));
-    }
 }
 
 static int popcount(uint32_t v)
@@ -101,9 +86,9 @@ const std::string& Shape::name(int index) const
 
 int Shape::findName(const std::string& n) const
 {
-    const std::string key = lowerAscii(n);
+    const std::string key = toLower(n);
     for (int i = 0; i < int(names.size()); ++i) {
-        if (lowerAscii(names[i]) == key) {
+        if (toLower(names[i]) == key) {
             return i;
         }
     }
@@ -182,15 +167,38 @@ void Shape::rebuildLinks()
     }
 }
 
-static void extendBox(Box& b, const Vec3& p, bool& first)
+void Box::extend(const Vec3& p, bool& first)
 {
     if (first) {
-        b.min = b.max = p;
+        min = max = p;
         first = false;
         return;
     }
-    b.min = {std::min(b.min.x, p.x), std::min(b.min.y, p.y), std::min(b.min.z, p.z)};
-    b.max = {std::max(b.max.x, p.x), std::max(b.max.y, p.y), std::max(b.max.z, p.z)};
+    min = {std::min(min.x, p.x), std::min(min.y, p.y), std::min(min.z, p.z)};
+    max = {std::max(max.x, p.x), std::max(max.y, p.y), std::max(max.z, p.z)};
+}
+
+const Mesh* Shape::detailMesh(int object, int detail) const
+{
+    const Object& obj = objects[object];
+    const Detail& det = details[detail];
+    if (det.subShapeNum != subShapeOfObject(object) || det.objectDetailNum < 0 || det.objectDetailNum >= obj.numMeshes) {
+        return nullptr;
+    }
+    const int mi = obj.startMeshIndex + det.objectDetailNum;
+    return mi < 0 || mi >= int(meshes.size()) || meshes[mi].isNull() ? nullptr : &meshes[mi];
+}
+
+int Shape::highestVisibleDetail() const
+{
+    int best = -1;
+    for (int d = 0; d < int(details.size()); ++d) {
+        const Detail& det = details[d];
+        if (det.subShapeNum >= 0 && det.size >= 0 && (best < 0 || det.size > details[best].size)) {
+            best = d;
+        }
+    }
+    return best;
 }
 
 void Shape::computeBounds()
@@ -203,7 +211,7 @@ void Shape::computeBounds()
         bool first = true;
         m.bounds = {};
         for (const Vec3& p : v) {
-            extendBox(m.bounds, p, first);
+            m.bounds.extend(p, first);
         }
         m.center = (m.bounds.min + m.bounds.max) * 0.5f;
         float r = 0;
@@ -220,30 +228,22 @@ void Shape::computeBounds()
     std::vector<Vec3> points;
     for (int o = 0; o < int(objects.size()); ++o) {
         const Object& obj = objects[o];
-        const int ss = subShapeOfObject(o);
         for (int d = 0; d < int(details.size()); ++d) {
-            const Detail& det = details[d];
-            if (det.size < 0 || det.subShapeNum != ss || det.objectDetailNum < 0 || det.objectDetailNum >= obj.numMeshes) {
+            const Mesh* m = details[d].size < 0 ? nullptr : detailMesh(o, d);
+            if (!m) {
                 continue;
             }
-            const int mi = obj.startMeshIndex + det.objectDetailNum;
-            if (mi < 0 || mi >= int(meshes.size()) || meshes[mi].isNull()) {
-                continue;
-            }
-            const Mesh& m = meshes[mi];
-            if (m.isSkin()) {
-                std::vector<Vec3> posed;
-                skinVerts(m, world, posed);
-                for (const Vec3& w : posed) {
-                    extendBox(bounds, w, first);
-                    points.push_back(w);
+            std::vector<Vec3> posed;
+            if (m->isSkin()) {
+                skinVerts(*m, world, posed);
+            } else {
+                const Mat4 xf = obj.nodeIndex < 0 ? Mat4{} : world[obj.nodeIndex];
+                for (const Vec3& p : m->restVerts()) {
+                    posed.push_back(mulPoint(xf, p));
                 }
-                continue;
             }
-            const Mat4 xf = obj.nodeIndex < 0 ? Mat4{} : world[obj.nodeIndex];
-            for (const Vec3& p : m.restVerts()) {
-                const Vec3 w = mulPoint(xf, p);
-                extendBox(bounds, w, first);
+            for (const Vec3& w : posed) {
+                bounds.extend(w, first);
                 points.push_back(w);
             }
         }

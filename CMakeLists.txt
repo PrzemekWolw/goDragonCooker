@@ -246,6 +246,7 @@ FetchContent_MakeAvailable(openexr)
 # Texture codecs (texconv, Compressonator Vulkan) and cook rules.
 add_library(gdc_texture STATIC
     app/texture/imageheader.cpp
+    app/texture/image_load.cpp
     app/texture/texconv.cpp
     app/texture/vulkan_codec.cpp
     app/texture/cook_rules.cpp

@@ -113,7 +113,6 @@ struct Job {
 void runConverter(ModelSettings s)
 {
     TaskState& tab = modelTab.task;
-    tab.begin(tr("gdc.model.seekingModels"));
     const model::Format* target = model::formatById(s.target);
     if (!target || !target->canWrite) {
         tab.log(tr("gdc.model.noTargetFormatSelected"));
@@ -335,53 +334,39 @@ void modelTabInit()
 {
     registerSettings(
         [](const SettingsJson& j) {
-            if (!j.contains("modelConverter") || !j["modelConverter"].is_object()) {
-                return;
-            }
-            const SettingsJson& m = j["modelConverter"];
+            const SettingsJson m = j.value("modelConverter", SettingsJson::object());
             ModelSettings& s = modelTab.settings;
-            s.directory = m.value("directory", "");
-            s.outDir = m.value("outDir", "");
-            s.mirror = m.value("mirror", false);
-            s.overwrite = m.value("overwrite", false);
-            s.validate = m.value("validate", true);
-            s.verboseLog = m.value("verboseLog", false);
-            if (m.contains("sourceExts") && m["sourceExts"].is_array()) {
-                for (const auto& e : m["sourceExts"]) {
-                    if (e.is_string()) {
-                        s.sourceExts.insert(e.get<std::string>());
-                    }
-                }
+            s.directory = m.value("directory", s.directory);
+            s.outDir = m.value("outDir", s.outDir);
+            s.mirror = m.value("mirror", s.mirror);
+            s.overwrite = m.value("overwrite", s.overwrite);
+            s.validate = m.value("validate", s.validate);
+            s.verboseLog = m.value("verboseLog", s.verboseLog);
+            s.target = m.value("target", s.target);
+            const SettingsJson exts = m.value("sourceExts", SettingsJson::array());
+            for (const auto& e : exts) {
+                s.sourceExts.insert(e.get<std::string>());
             }
-            if (m.contains("target") && m["target"].is_string()) {
-                s.target = m["target"].get<std::string>();
-            } else if (m.contains("targets") && m["targets"].is_array() && !m["targets"].empty() &&
-                       m["targets"][0].is_string()) {
-                s.target = m["targets"][0].get<std::string>();
-            }
-            if (m.contains("formatSettings") && m["formatSettings"].is_object()) {
-                for (const auto& [id, v] : m["formatSettings"].items()) {
-                    s.formatSettings[id] = nlohmann::json::parse(v.dump());
-                }
+            const SettingsJson formats = m.value("formatSettings", SettingsJson::object());
+            for (const auto& [id, v] : formats.items()) {
+                s.formatSettings[id] = nlohmann::json(v);
             }
         },
         [](SettingsJson& j) {
             const ModelSettings& s = modelTab.settings;
-            SettingsJson m = SettingsJson::object();
-            m["directory"] = s.directory;
-            m["outDir"] = s.outDir;
-            m["mirror"] = s.mirror;
-            m["overwrite"] = s.overwrite;
-            m["validate"] = s.validate;
-            m["verboseLog"] = s.verboseLog;
-            m["sourceExts"] = std::vector<std::string>(s.sourceExts.begin(), s.sourceExts.end());
-            m["target"] = s.target;
-            SettingsJson fs = SettingsJson::object();
+            SettingsJson formats = SettingsJson::object();
             for (const auto& [id, v] : s.formatSettings) {
-                fs[id] = SettingsJson::parse(v.dump());
+                formats[id] = SettingsJson(v);
             }
-            m["formatSettings"] = fs;
-            j["modelConverter"] = m;
+            j["modelConverter"] = {{"directory", s.directory},
+                                   {"outDir", s.outDir},
+                                   {"mirror", s.mirror},
+                                   {"overwrite", s.overwrite},
+                                   {"validate", s.validate},
+                                   {"verboseLog", s.verboseLog},
+                                   {"sourceExts", s.sourceExts},
+                                   {"target", s.target},
+                                   {"formatSettings", formats}};
         });
 }
 
@@ -395,12 +380,7 @@ void modelTabUI()
     bool dirty = false;
 
     ImGui::TextUnformatted(tr("gdc.model.modelsDirectory"));
-    dirty |= ImGui::InputText("##model_directory", &s.directory);
-    ImGui::SameLine();
-    if (iconButton(ICON_FOLDER_OPEN, "model_dir")) {
-        openDirPicker(&s.directory);
-    }
-    tooltip("gdc.common.browse");
+    dirty |= directoryField("##model_directory", s.directory);
     ImGui::SameLine();
     if (ImGui::Button(iconLabel(ICON_REFRESH, "gdc.model.scan", "model_scan").c_str()) && !s.directory.empty()) {
         scan(t);
@@ -463,12 +443,7 @@ void modelTabUI()
     dirty |= ImGui::RadioButton(trId("gdc.model.writeIntoFolderMirrorsThe", "model_mode_folder").c_str(), &mode, 1);
     s.mirror = mode == 1;
     if (s.mirror) {
-        dirty |= ImGui::InputText("##model_outdir", &s.outDir);
-        ImGui::SameLine();
-        if (iconButton(ICON_FOLDER_OPEN, "model_out")) {
-            openDirPicker(&s.outDir);
-        }
-        tooltip("gdc.common.browse");
+        dirty |= directoryField("##model_outdir", s.outDir);
     }
     dirty |= ImGui::Checkbox(trId("gdc.model.overwriteExistingFiles", "model_overwrite").c_str(), &s.overwrite);
     tooltip("gdc.model.overwriteExistingFiles.tooltip");
@@ -482,28 +457,15 @@ void modelTabUI()
     }
 
     ImGui::Separator();
-    std::string status;
-    bool running;
     std::vector<std::string> logLines;
-    {
-        std::lock_guard lock(t.task.mu);
-        status = t.task.status;
-        running = t.task.running;
-        logLines = t.task.logLines;
-    }
-    if (running) {
-        if (ImGui::Button(iconLabel(ICON_STOP, "gdc.model.stopConverter", "model_run").c_str())) {
-            t.task.stop = true;
-        }
-    } else if (ImGui::Button(iconLabel(ICON_PLAY_ARROW, "gdc.model.convertModels", "model_run").c_str()) &&
-               !s.directory.empty()) {
+    if (taskButton(t.task, iconLabel(ICON_PLAY_ARROW, "gdc.model.convertModels", "model_run"),
+                   iconLabel(ICON_STOP, "gdc.model.stopConverter", "model_run"), logLines) &&
+        !s.directory.empty()) {
         if (t.found.empty() || t.scannedDir != s.directory) {
             scan(t);
         }
-        t.task.log("");
-        std::thread(runConverter, s).detach();
+        startTask(t.task, tr("gdc.model.seekingModels"), [s] { runConverter(s); });
     }
-    ImGui::Text(tr("gdc.common.status"), status.empty() ? tr("gdc.common.waiting") : status.c_str());
 
     ImGui::Separator();
     logView("##model_log", logLines, 280, modelLogLevel);

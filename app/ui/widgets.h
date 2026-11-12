@@ -20,6 +20,13 @@ bool toggleButton(const std::string& label, bool on, const ImVec4& color);
 
 void openDirPicker(std::string* target);
 void renderDirPicker();
+// Path input with a browse button. True when the text was edited.
+bool directoryField(const char* id, std::string& dir);
+
+struct TaskState;
+// Run/stop button and status line of a background task; `logLines` gets a snapshot of its log.
+// True when run was pressed.
+bool taskButton(TaskState& task, const std::string& runLabel, const std::string& stopLabel, std::vector<std::string>& logLines);
 
 enum class LogLevel { Info, Detail, Ok, Warn, Error };
 

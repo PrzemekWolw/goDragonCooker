@@ -44,87 +44,30 @@ struct StreamIn {
 class MemIn {
 public:
     MemIn(const int32_t* b32, size_t n32, const int16_t* b16, size_t n16, const int8_t* b8, size_t n8)
-        : m32(b32), c32(n32), m16(b16), c16(n16), m8(b8), c8(n8)
+        : l32{b32, n32}, l16{b16, n16}, l8{b8, n8}
     {
     }
 
     int32_t get32()
     {
-        if (p32 >= c32) {
-            fail("32-bit buffer overrun");
-            return 0;
-        }
-        return m32[p32++];
+        int32_t v = 0;
+        get(l32, &v, 1);
+        return v;
     }
     float getF()
     {
-        const int32_t v = get32();
-        float f;
-        std::memcpy(&f, &v, 4);
+        float f = 0;
+        get(l32, &f, 1);
         return f;
     }
-    bool get32(void* dst, size_t count)
-    {
-        if (count > c32 - std::min(p32, c32)) {
-            fail("32-bit buffer overrun");
-            return false;
-        }
-        if (count) {
-            std::memcpy(dst, m32 + p32, count * 4);
-        }
-        p32 += count;
-        return true;
-    }
-    void skip32(int64_t count)
-    {
-        if (count < 0 || size_t(count) > c32 - std::min(p32, c32)) {
-            fail("32-bit buffer overrun");
-            return;
-        }
-        p32 += size_t(count);
-    }
-    bool get16(void* dst, size_t count)
-    {
-        if (count > c16 - std::min(p16, c16)) {
-            fail("16-bit buffer overrun");
-            return false;
-        }
-        if (count) {
-            std::memcpy(dst, m16 + p16, count * 2);
-        }
-        p16 += count;
-        return true;
-    }
-    void skip16(int64_t count)
-    {
-        if (count < 0 || size_t(count) > c16 - std::min(p16, c16)) {
-            fail("16-bit buffer overrun");
-            return;
-        }
-        p16 += size_t(count);
-    }
-    bool get8(void* dst, size_t count)
-    {
-        if (count > c8 - std::min(p8, c8)) {
-            fail("8-bit buffer overrun");
-            return false;
-        }
-        if (count) {
-            std::memcpy(dst, m8 + p8, count);
-        }
-        p8 += count;
-        return true;
-    }
-    void skip8(int64_t count)
-    {
-        if (count < 0 || size_t(count) > c8 - std::min(p8, c8)) {
-            fail("8-bit buffer overrun");
-            return;
-        }
-        p8 += size_t(count);
-    }
-    const int8_t* peek8() const { return m8 + p8; }
-    size_t left8() const { return c8 - std::min(p8, c8); }
+    bool get32(void* dst, size_t count) { return get(l32, dst, count); }
+    bool get16(void* dst, size_t count) { return get(l16, dst, count); }
+    bool get8(void* dst, size_t count) { return get(l8, dst, count); }
+    void skip32(int64_t count) { skip(l32, count); }
+    void skip16(int64_t count) { skip(l16, count); }
+    void skip8(int64_t count) { skip(l8, count); }
+    const int8_t* peek8() const { return l8.data + l8.pos; }
+    size_t left8() const { return l8.left(); }
 
     bool checkGuard(const char* where)
     {
@@ -151,7 +94,7 @@ public:
     int32_t getCount(const char* what)
     {
         const int32_t n = get32();
-        if (n < 0 || size_t(n) > (c32 + c16 + c8) * 4 + 16) {
+        if (n < 0 || size_t(n) > (l32.count + l16.count + l8.count) * 4 + 16) {
             fail(format("bad %s count %d", what, n));
             return 0;
         }
@@ -168,13 +111,45 @@ public:
     const std::string& error() const { return err; }
 
 private:
-    const int32_t* m32;
-    size_t c32;
-    const int16_t* m16;
-    size_t c16;
-    const int8_t* m8;
-    size_t c8;
-    size_t p32 = 0, p16 = 0, p8 = 0;
+    template <class T>
+    struct Lane {
+        const T* data;
+        size_t count;
+        size_t pos = 0;
+        size_t left() const { return count - std::min(pos, count); }
+    };
+
+    template <class T>
+    bool overrun(const Lane<T>&)
+    {
+        fail(format("%d-bit buffer overrun", int(sizeof(T) * 8)));
+        return false;
+    }
+    template <class T>
+    bool get(Lane<T>& lane, void* dst, size_t count)
+    {
+        if (count > lane.left()) {
+            return overrun(lane);
+        }
+        if (count) {
+            std::memcpy(dst, lane.data + lane.pos, count * sizeof(T));
+        }
+        lane.pos += count;
+        return true;
+    }
+    template <class T>
+    void skip(Lane<T>& lane, int64_t count)
+    {
+        if (count < 0 || size_t(count) > lane.left()) {
+            overrun(lane);
+        } else {
+            lane.pos += size_t(count);
+        }
+    }
+
+    Lane<int32_t> l32;
+    Lane<int16_t> l16;
+    Lane<int8_t> l8;
     int32_t guard32 = 0, guard16 = 0, guard8 = 0;
     std::string err;
 };
@@ -309,22 +284,14 @@ bool readMaterialList(StreamIn& s, int V, std::vector<Material>& mats)
             m.name = stripMaterialPath(name);
         }
     }
-    for (Material& m : mats) {
-        m.flags = s.read<uint32_t>();
-    }
-    for (Material& m : mats) {
-        m.reflectanceMap = s.read<uint32_t>();
-    }
-    for (Material& m : mats) {
-        m.bumpMap = s.read<uint32_t>();
-    }
-    for (Material& m : mats) {
-        m.detailMap = s.read<uint32_t>();
-    }
-    if (V == 25) {
-        for (size_t i = 0; i < mats.size(); ++i) {
-            s.read<uint32_t>();
+    // Each field is stored for all materials before the next one.
+    for (uint32_t Material::*field : {&Material::flags, &Material::reflectanceMap, &Material::bumpMap, &Material::detailMap}) {
+        for (Material& m : mats) {
+            m.*field = s.read<uint32_t>();
         }
+    }
+    for (size_t i = 0; V == 25 && i < mats.size(); ++i) {
+        s.read<uint32_t>();
     }
     for (Material& m : mats) {
         m.detailScale = s.read<float>();
@@ -370,6 +337,15 @@ private:
         }
         return nullptr;
     }
+    template <class T>
+    void readOrShare(std::vector<T>& dst, const Mesh* parent, std::vector<T> Mesh::*field, int32_t count)
+    {
+        if (parent) {
+            shareFrom(dst, parent->*field, count);
+        } else {
+            getVec32(in, dst, count);
+        }
+    }
     bool readMesh(MeshType type, Mesh& m, const std::vector<Mesh>& pool);
     bool readSkinExtra(Mesh& m, const Mesh* parent);
     bool readSorted();
@@ -404,43 +380,20 @@ bool LegacyReader::readMesh(MeshType type, Mesh& m, const std::vector<Mesh>& poo
         parent = &pool[m.parentMesh];
     }
 
+    const bool skinParent = parent && parent->isSkin();
     const int32_t numVerts = in.getCount("vertex");
-    if (parent) {
-        shareFrom(m.verts, parent->isSkin() ? parent->initialVerts : parent->verts, numVerts);
-    } else {
-        getVec32(in, m.verts, numVerts);
-    }
-    const int32_t numTVerts = in.getCount("uv");
-    if (parent) {
-        shareFrom(m.tverts, parent->tverts, numTVerts);
-    } else {
-        getVec32(in, m.tverts, numTVerts);
-    }
+    readOrShare(m.verts, parent, skinParent ? &Mesh::initialVerts : &Mesh::verts, numVerts);
+    readOrShare(m.tverts, parent, &Mesh::tverts, in.getCount("uv"));
     if (V > 25) {
-        const int32_t numT2 = in.getCount("uv2");
-        if (parent) {
-            shareFrom(m.tverts2, parent->tverts2, numT2);
-        } else {
-            getVec32(in, m.tverts2, numT2);
-        }
-        const int32_t numColors = in.getCount("color");
-        if (parent) {
-            shareFrom(m.colors, parent->colors, numColors);
-        } else {
-            getVec32(in, m.colors, numColors);
-        }
+        readOrShare(m.tverts2, parent, &Mesh::tverts2, in.getCount("uv2"));
+        readOrShare(m.colors, parent, &Mesh::colors, in.getCount("color"));
     }
-    if (parent) {
-        shareFrom(m.norms, parent->isSkin() ? parent->initialNorms : parent->norms, numVerts);
-        if (V > 21) {
-            shareFrom(m.encodedNorms, parent->encodedNorms, numVerts);
-        }
-    } else {
-        getVec32(in, m.norms, numVerts);
-        if (V > 21) {
-            m.encodedNorms.resize(size_t(numVerts));
-            in.get8(m.encodedNorms.data(), m.encodedNorms.size());
-        }
+    readOrShare(m.norms, parent, skinParent ? &Mesh::initialNorms : &Mesh::norms, numVerts);
+    if (V > 21 && parent) {
+        shareFrom(m.encodedNorms, parent->encodedNorms, numVerts);
+    } else if (V > 21) {
+        m.encodedNorms.resize(size_t(numVerts));
+        in.get8(m.encodedNorms.data(), m.encodedNorms.size());
     }
 
     if (V > 25) {
@@ -472,12 +425,7 @@ bool LegacyReader::readMesh(MeshType type, Mesh& m, const std::vector<Mesh>& poo
     m.flags = uint32_t(in.get32()) & ~uint32_t(UseEncodedNormals);
 
     if (V >= 28) {
-        const int32_t numTangents = in.getCount("tangent");
-        if (parent) {
-            shareFrom(m.tangents, parent->tangents, numTangents);
-        } else {
-            getVec32(in, m.tangents, numTangents);
-        }
+        readOrShare(m.tangents, parent, &Mesh::tangents, in.getCount("tangent"));
     }
     in.checkGuard("mesh end");
 
@@ -490,41 +438,19 @@ bool LegacyReader::readMesh(MeshType type, Mesh& m, const std::vector<Mesh>& poo
 bool LegacyReader::readSkinExtra(Mesh& m, const Mesh* parent)
 {
     const int32_t numVerts = in.getCount("skin vertex");
-    if (parent) {
-        shareFrom(m.initialVerts, parent->initialVerts, numVerts);
-        shareFrom(m.initialNorms, parent->initialNorms, numVerts);
-        if (V > 21) {
-            shareFrom(m.encodedNorms, parent->encodedNorms, numVerts);
-        }
-    } else {
-        getVec32(in, m.initialVerts, numVerts);
-        getVec32(in, m.initialNorms, numVerts);
-        if (V > 21) {
-            in.skip8(numVerts);
-        }
+    readOrShare(m.initialVerts, parent, &Mesh::initialVerts, numVerts);
+    readOrShare(m.initialNorms, parent, &Mesh::initialNorms, numVerts);
+    if (V > 21 && parent) {
+        shareFrom(m.encodedNorms, parent->encodedNorms, numVerts);
+    } else if (V > 21) {
+        in.skip8(numVerts);
     }
-    const int32_t numXforms = in.getCount("skin transform");
-    if (parent) {
-        shareFrom(m.initialTransforms, parent->initialTransforms, numXforms);
-    } else {
-        getVec32(in, m.initialTransforms, numXforms);
-    }
+    readOrShare(m.initialTransforms, parent, &Mesh::initialTransforms, in.getCount("skin transform"));
     const int32_t numWeights = in.getCount("skin weight");
-    if (parent) {
-        shareFrom(m.vertexIndex, parent->vertexIndex, numWeights);
-        shareFrom(m.boneIndex, parent->boneIndex, numWeights);
-        shareFrom(m.weight, parent->weight, numWeights);
-    } else {
-        getVec32(in, m.vertexIndex, numWeights);
-        getVec32(in, m.boneIndex, numWeights);
-        getVec32(in, m.weight, numWeights);
-    }
-    const int32_t numNodes = in.getCount("skin node");
-    if (parent) {
-        shareFrom(m.nodeIndex, parent->nodeIndex, numNodes);
-    } else {
-        getVec32(in, m.nodeIndex, numNodes);
-    }
+    readOrShare(m.vertexIndex, parent, &Mesh::vertexIndex, numWeights);
+    readOrShare(m.boneIndex, parent, &Mesh::boneIndex, numWeights);
+    readOrShare(m.weight, parent, &Mesh::weight, numWeights);
+    readOrShare(m.nodeIndex, parent, &Mesh::nodeIndex, in.getCount("skin node"));
     in.checkGuard("skin end");
     return !in.failed();
 }
@@ -917,36 +843,11 @@ public:
     std::vector<int8_t> b8;
 
     void set32(int32_t v) { b32.push_back(v); }
-    void setF(float f)
-    {
-        int32_t v;
-        std::memcpy(&v, &f, 4);
-        b32.push_back(v);
-    }
-    void put32(const void* src, size_t count)
-    {
-        const size_t at = b32.size();
-        b32.resize(at + count);
-        if (count && src) {
-            std::memcpy(b32.data() + at, src, count * 4);
-        }
-    }
-    void put16(const void* src, size_t count)
-    {
-        const size_t at = b16.size();
-        b16.resize(at + count);
-        if (count && src) {
-            std::memcpy(b16.data() + at, src, count * 2);
-        }
-    }
-    void put8(const void* src, size_t count)
-    {
-        const size_t at = b8.size();
-        b8.resize(at + count);
-        if (count && src) {
-            std::memcpy(b8.data() + at, src, count);
-        }
-    }
+    void setF(float f) { put32(&f, 1); }
+    // A null `src` writes zeros.
+    void put32(const void* src, size_t count) { put(b32, src, count); }
+    void put16(const void* src, size_t count) { put(b16, src, count); }
+    void put8(const void* src, size_t count) { put(b8, src, count); }
     void setGuard()
     {
         b32.push_back(guard);
@@ -956,6 +857,16 @@ public:
     }
 
 private:
+    template <class T>
+    static void put(std::vector<T>& buffer, const void* src, size_t count)
+    {
+        const size_t at = buffer.size();
+        buffer.resize(at + count);
+        if (count && src) {
+            std::memcpy(buffer.data() + at, src, count * sizeof(T));
+        }
+    }
+
     int32_t guard = 0;
 };
 
@@ -1306,28 +1217,18 @@ bool writeDts(const Shape& shapeIn, int V, std::vector<uint8_t>& data, std::stri
         s.write(uint8_t(len));
         s.writeBytes(m.name.data(), len);
     }
-    for (const Material& m : shape.materials) {
-        s.write(m.flags);
-    }
-    for (const Material& m : shape.materials) {
-        s.write(m.reflectanceMap);
-    }
-    for (const Material& m : shape.materials) {
-        s.write(m.bumpMap);
-    }
-    for (const Material& m : shape.materials) {
-        s.write(m.detailMap);
-    }
-    if (V == 25) {
-        for (size_t i = 0; i < shape.materials.size(); ++i) {
-            s.write(uint32_t(0xFFFFFFFF));
+    for (uint32_t Material::*field : {&Material::flags, &Material::reflectanceMap, &Material::bumpMap, &Material::detailMap}) {
+        for (const Material& m : shape.materials) {
+            s.write(m.*field);
         }
     }
-    for (const Material& m : shape.materials) {
-        s.write(m.detailScale);
+    for (size_t i = 0; V == 25 && i < shape.materials.size(); ++i) {
+        s.write(uint32_t(0xFFFFFFFF));
     }
-    for (const Material& m : shape.materials) {
-        s.write(m.reflectionAmount);
+    for (float Material::*field : {&Material::detailScale, &Material::reflectionAmount}) {
+        for (const Material& m : shape.materials) {
+            s.write(m.*field);
+        }
     }
     return true;
 }

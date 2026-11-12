@@ -215,16 +215,6 @@ void setSelectedGPU(int index)
 
 #else
 
-static std::vector<std::string> readLines(const fs::path& path)
-{
-    std::vector<std::string> lines;
-    std::ifstream file(path);
-    for (std::string line; std::getline(file, line);) {
-        lines.push_back(line);
-    }
-    return lines;
-}
-
 std::vector<std::string> platformGPUInfo()
 {
     std::vector<std::string> report = platformSystemInfo();

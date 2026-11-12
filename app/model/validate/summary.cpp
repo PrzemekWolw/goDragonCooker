@@ -11,36 +11,10 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include <assimp/SceneCombiner.h>
-#include <assimp/scene.h>
-
 #include "core/strings.h"
+#include "model/assimp/ai_util.h"
 
 namespace model {
-
-bool isBaseStart(const aiNode* node)
-{
-    if (!node || !hasPrefix(toLower(node->mName.C_Str()), "base")) {
-        return false;
-    }
-    for (unsigned i = 0; i < node->mNumChildren; ++i) {
-        if (hasPrefix(toLower(node->mChildren[i]->mName.C_Str()), "start")) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool lodAnchor(const aiNode* node)
-{
-    for (unsigned i = 0; node && i < node->mNumChildren; ++i) {
-        if (isBaseStart(node->mChildren[i])) {
-            return true;
-        }
-    }
-    return false;
-}
-
 namespace {
 
 void foldMeshNodes(aiScene& scene, const std::function<std::string(const std::string&, const std::string&)>& rule)
@@ -78,34 +52,6 @@ void foldMeshNodes(aiScene& scene, const std::function<std::string(const std::st
 
 using namespace ts;
 
-Mat4 rigidOf(const Mat4& m)
-{
-    Vec3 t, s;
-    Quat r;
-    decompose(m, t, r, s);
-    return composeTRS(t, r, {1, 1, 1});
-}
-
-Mat4 normalMat(const Mat4& m)
-{
-    const Mat4 inv = inverse(m);
-    Mat4 t;
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
-            t.at(r, c) = inv.at(c, r);
-        }
-    }
-    return t;
-}
-
-Mat4 fromAi(const aiMatrix4x4& a)
-{
-    Mat4 m;
-    const float src[16] = {a.a1, a.a2, a.a3, a.a4, a.b1, a.b2, a.b3, a.b4, a.c1, a.c2, a.c3, a.c4, a.d1, a.d2, a.d3, a.d4};
-    std::memcpy(m.m, src, sizeof(src));
-    return m;
-}
-
 Mat4 blend(const std::vector<std::pair<Mat4, float>>& parts, const Mat4& fallback)
 {
     float total = 0;
@@ -136,13 +82,7 @@ void finishTri(Summary& s, Tri& t, bool& firstBound)
         if (!finite(c.pos) || !finite(c.nrm) || !std::isfinite(c.uv0.x) || !std::isfinite(c.uv0.y)) {
             ++s.nanValues;
         }
-        if (firstBound) {
-            s.bounds.min = s.bounds.max = c.pos;
-            firstBound = false;
-        } else {
-            s.bounds.min = {std::min(s.bounds.min.x, c.pos.x), std::min(s.bounds.min.y, c.pos.y), std::min(s.bounds.min.z, c.pos.z)};
-            s.bounds.max = {std::max(s.bounds.max.x, c.pos.x), std::max(s.bounds.max.y, c.pos.y), std::max(s.bounds.max.z, c.pos.z)};
-        }
+        s.bounds.extend(c.pos, firstBound);
     }
     if (length(cross(t.c[1].pos - t.c[0].pos, t.c[2].pos - t.c[0].pos)) <= 0.0f) {
         ++s.degenerate;
@@ -180,34 +120,6 @@ Vec3 seqTrans(const Shape& s, const Sequence& q, int node, int k)
     return i < s.nodeTranslations.size() ? s.nodeTranslations[i] : s.defaultTranslations[node];
 }
 
-// ---- Assimp animation ----
-
-template <class Key, class V>
-V sampleKeys(const Key* keys, unsigned count, double tps, double t, const V& absent)
-{
-    if (!count) {
-        return absent;
-    }
-    const Key* next = std::lower_bound(keys + 1, keys + count, t, [tps](const Key& k, double time) { return k.mTime / tps < time; });
-    if (next == keys + count) {
-        return keys[count - 1].mValue;
-    }
-    const Key* prev = next - 1;
-    const double t0 = prev->mTime / tps, t1 = next->mTime / tps;
-    if (t <= t0 || t1 <= t0) {
-        return prev->mValue;
-    }
-    const float f = float((t - t0) / (t1 - t0));
-    if constexpr (std::is_same_v<V, aiQuaternion>) {
-        aiQuaternion out;
-        aiQuaternion::Interpolate(out, prev->mValue, next->mValue, f);
-        out.Normalize();
-        return out;
-    } else {
-        return prev->mValue + (next->mValue - prev->mValue) * f;
-    }
-}
-
 } // namespace
 
 Summary summarize(const Shape& shape, const DetailFilter& filter)
@@ -236,34 +148,20 @@ Summary summarize(const Shape& shape, const DetailFilter& filter)
         s.materials.push_back(m.name);
     }
 
-    int highestVisible = -1;
-    for (int d = 0; d < int(shape.details.size()); ++d) {
-        const Detail& det = shape.details[d];
-        if (det.subShapeNum >= 0 && det.size >= 0 && (highestVisible < 0 || det.size > shape.details[highestVisible].size)) {
-            highestVisible = d;
-        }
-    }
-
+    const int highestVisible = shape.highestVisibleDetail();
     bool firstBound = true;
     for (int o = 0; o < int(shape.objects.size()); ++o) {
         const Object& obj = shape.objects[o];
-        const int ss = shape.subShapeOfObject(o);
         for (int d = 0; d < int(shape.details.size()); ++d) {
             const Detail& det = shape.details[d];
-            if (det.subShapeNum != ss || det.objectDetailNum < 0 || det.objectDetailNum >= obj.numMeshes) {
+            if ((!filter.allDetails && d != highestVisible) || (det.size < 0 && !filter.collision)) {
                 continue;
             }
-            if (!filter.allDetails && d != highestVisible) {
+            const Mesh* found = shape.detailMesh(o, d);
+            if (!found) {
                 continue;
             }
-            if (det.size < 0 && !filter.collision) {
-                continue;
-            }
-            const int mi = obj.startMeshIndex + det.objectDetailNum;
-            if (mi < 0 || mi >= int(shape.meshes.size()) || shape.meshes[mi].isNull()) {
-                continue;
-            }
-            Mesh m = shape.meshes[mi];
+            Mesh m = *found;
             convertToTriangles(m);
             const bool skin = m.isSkin();
             const std::vector<Vec3>& verts = m.restVerts();
@@ -327,7 +225,7 @@ Summary summarize(const Shape& shape, const DetailFilter& filter)
                         const Mat4& xf = vertexXf[v];
                         Corner& c = t.c[k];
                         c.pos = mulPoint(xf, verts[v]);
-                        c.nrm = v < norms.size() ? normalize(mulVector(normalMat(xf), norms[v])) : Vec3{};
+                        c.nrm = v < norms.size() ? normalize(mulVector(normalMatrix(xf), norms[v])) : Vec3{};
                         c.uv0 = v < m.tverts.size() ? m.tverts[v] : Vec2{};
                         c.uv1 = v < m.tverts2.size() ? m.tverts2[v] : Vec2{};
                         c.color = v < m.colors.size() ? m.colors[v] : Color8{};
@@ -385,9 +283,7 @@ Summary summarize(const Shape& shape, const DetailFilter& filter)
 Summary summarize(const aiScene& scene, const SceneNames& names)
 {
     if (names.meshNameOf && scene.mRootNode) {
-        aiScene* copy = nullptr;
-        Assimp::SceneCombiner::CopyScene(&copy, &scene);
-        const std::unique_ptr<aiScene> folded(copy);
+        const std::unique_ptr<aiScene> folded = cloneScene(scene);
         foldMeshNodes(*folded, names.meshNameOf);
         SceneNames plain = names;
         plain.meshNameOf = nullptr;
@@ -418,7 +314,7 @@ Summary summarize(const aiScene& scene, const SceneNames& names)
     std::vector<const aiNode*> order;
     std::unordered_set<std::string> taken;
     auto walk = [&](auto& self, const aiNode* n, const Mat4& parent, const std::string& parentName) -> void {
-        const Mat4 w = parent * fromAi(n->mTransformation);
+        const Mat4 w = parent * toMat4(n->mTransformation);
         worldOf[n] = w;
         byName.emplace(n->mName.C_Str(), n);
         order.push_back(n);
@@ -438,7 +334,7 @@ Summary summarize(const aiScene& scene, const SceneNames& names)
                 pose.name = unique;
             }
             pose.parent = parentName;
-            pose.world = rigidOf(w);
+            pose.world = rigidPart(w);
             pose.meshHolder = n->mNumMeshes && !n->mNumChildren;
             pose.mirrored = determinant3(w) < 0.0f;
             keptName[n] = pose.name;
@@ -532,7 +428,7 @@ Summary summarize(const aiScene& scene, const SceneNames& names)
                     const aiBone* bone = am->mBones[b];
                     auto it = byName.find(bone->mName.C_Str());
                     const Mat4 boneWorld = it != byName.end() ? worldOf[it->second] : Mat4{};
-                    const Mat4 m = boneWorld * fromAi(bone->mOffsetMatrix);
+                    const Mat4 m = boneWorld * toMat4(bone->mOffsetMatrix);
                     for (unsigned w = 0; w < bone->mNumWeights; ++w) {
                         const aiVertexWeight& vw = bone->mWeights[w];
                         if (vw.mVertexId < nv && vw.mWeight > 0) {
@@ -559,7 +455,7 @@ Summary summarize(const aiScene& scene, const SceneNames& names)
             auto corner = [&](unsigned v, Corner& c) {
                 const Mat4& m = xf[v];
                 c.pos = mulPoint(m, {am->mVertices[v].x, am->mVertices[v].y, am->mVertices[v].z});
-                const Mat4 nm = normalMat(m);
+                const Mat4 nm = normalMatrix(m);
                 if (am->mNormals) {
                     c.nrm = normalize(mulVector(nm, {am->mNormals[v].x, am->mNormals[v].y, am->mNormals[v].z}));
                 }
@@ -570,9 +466,7 @@ Summary summarize(const aiScene& scene, const SceneNames& names)
                     c.uv1 = {am->mTextureCoords[1][v].x, 1.0f - am->mTextureCoords[1][v].y};
                 }
                 if (am->HasVertexColors(0)) {
-                    const aiColor4D& col = am->mColors[0][v];
-                    auto b = [](float x) { return uint8_t(std::clamp(x * 255.0f + 0.5f, 0.0f, 255.0f)); };
-                    c.color = {b(col.r), b(col.g), b(col.b), b(col.a)};
+                    c.color = toColor8(am->mColors[0][v]);
                 }
                 if (am->HasTangentsAndBitangents()) {
                     const Vec3 t = normalize(mulVector(m, {am->mTangents[v].x, am->mTangents[v].y, am->mTangents[v].z}));
@@ -624,7 +518,7 @@ Summary summarize(const aiScene& scene, const SceneNames& names)
             std::unordered_map<const aiNode*, Mat4> w;
             for (size_t i = 0; i < order.size(); ++i) {
                 const aiNode* n = order[i];
-                Mat4 local = fromAi(n->mTransformation);
+                Mat4 local = toMat4(n->mTransformation);
                 auto ch = channels.find(n);
                 if (ch != channels.end()) {
                     aiVector3D bs, bp;
@@ -637,14 +531,14 @@ Summary summarize(const aiScene& scene, const SceneNames& names)
                     local = composeTRS({p.x, p.y, p.z}, Quat{r.x, r.y, r.z, r.w}, {sc.x, sc.y, sc.z});
                 }
                 w[n] = n->mParent ? w[n->mParent] * local : local;
-                perNode[i].push_back(rigidOf(w[n]));
+                perNode[i].push_back(rigidPart(w[n]));
             }
         }
         for (size_t i = 0; i < order.size(); ++i) {
             if (order[i] == scene.mRootNode) {
                 continue;
             }
-            const Mat4 rest = rigidOf(worldOf[order[i]]);
+            const Mat4 rest = rigidPart(worldOf[order[i]]);
             bool any = false;
             for (const Mat4& m : perNode[i]) {
                 any = any || moved(m, rest);

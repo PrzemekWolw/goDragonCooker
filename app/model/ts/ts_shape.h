@@ -16,6 +16,8 @@ constexpr int kMaxSetBits = 64 * 32;
 
 struct Box {
     Vec3 min{0, 0, 0}, max{0, 0, 0};
+    // Grows the box to hold p; the first point (first == true) resets it.
+    void extend(const Vec3& p, bool& first);
 };
 
 struct Node {
@@ -70,7 +72,6 @@ struct IntegerSet {
 
     bool test(int i) const;
     void set(int i);
-    void clear(int i);
     // number of set bits below i (position of i within the sequence's animated arrays)
     int rank(int i) const;
     int count() const;
@@ -261,6 +262,10 @@ struct Shape {
     Mat4 nodeDefaultWorld(int node) const;
     std::vector<Mat4> defaultWorldTransforms() const;
     int subShapeOfObject(int object) const;
+    // The object's mesh for a detail level, null when the detail has none for it (other subshape, null mesh).
+    const Mesh* detailMesh(int object, int detail) const;
+    // Largest non-negative mesh detail, -1 without one.
+    int highestVisibleDetail() const;
 
     // Fills firstObject/firstChild/nextSibling links and object nextSibling (computed at load in the engine).
     void rebuildLinks();
@@ -281,7 +286,5 @@ void skinVerts(const Mesh& mesh, const std::vector<Mat4>& nodeWorld, std::vector
 void primitiveTriangles(const Mesh& mesh, const Primitive& prim, std::vector<uint32_t>& out);
 // Converts every primitive to an indexed triangle list in place.
 void convertToTriangles(Mesh& mesh);
-
-std::string lowerAscii(std::string s);
 
 } // namespace ts

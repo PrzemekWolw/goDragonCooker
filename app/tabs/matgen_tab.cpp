@@ -5,8 +5,6 @@
 #include <map>
 #include <set>
 #include <sstream>
-#include <thread>
-
 #include <nlohmann/json.hpp>
 
 #include "core/i18n.h"
@@ -94,23 +92,20 @@ void matGenTabInit()
     matGenTab.settings.suffixes = defaultTextureEntries;
     registerSettings(
         [](const SettingsJson& j) {
-            if (!j.contains("materialGenerator") || !j["materialGenerator"].is_object()) {
-                return;
-            }
-            const SettingsJson& m = j["materialGenerator"];
+            const SettingsJson m = j.value("materialGenerator", SettingsJson::object());
             MatGenSettings& s = matGenTab.settings;
-            matGenTab.directory = m.value("directory", "");
+            matGenTab.directory = m.value("directory", matGenTab.directory);
             s.instanceOpacity = m.value("instanceOpacity", s.instanceOpacity);
             s.instanceEmissive = m.value("instanceEmissive", s.instanceEmissive);
             s.enableDetailMaps = m.value("enableDetailMaps", s.enableDetailMaps);
             s.detailScaleX = m.value("detailScaleX", s.detailScaleX);
             s.detailScaleY = m.value("detailScaleY", s.detailScaleY);
             s.customSuffixes.clear();
-            if (m.contains("customSuffixes") && m["customSuffixes"].is_array()) {
-                for (const auto& e : m["customSuffixes"]) {
-                    if (e.is_object() && e.value("suffix", "") != "" && e.value("stage", "") != "") {
-                        s.customSuffixes.push_back({e.value("suffix", ""), e.value("ext", ".color.png"), e.value("stage", "")});
-                    }
+            const SettingsJson custom = m.value("customSuffixes", SettingsJson::array());
+            for (const auto& e : custom) {
+                TexEntry entry{e.value("suffix", ""), e.value("ext", ".color.png"), e.value("stage", "")};
+                if (!entry.suffix.empty() && !entry.stageKey.empty()) {
+                    s.customSuffixes.push_back(entry);
                 }
             }
         },
@@ -322,7 +317,6 @@ static int mergeMaterials(const fs::path& path, const std::map<std::string, Json
 static void runMatGen(std::string directory, MatGenSettings settings)
 {
     TaskState& tab = matGenTab.task;
-    tab.begin(tr("gdc.matgen.scanning"));
 
     const fs::path root = cleanPath(directory);
     const fs::path levelsRoot = findLevelsRoot(root);
@@ -572,12 +566,7 @@ void matGenTabUI()
     MatGenSettings& s = m.settings;
 
     ImGui::TextUnformatted(tr("gdc.common.texturesDirectory"));
-    bool dirty = ImGui::InputText("##matgen_directory", &m.directory);
-    ImGui::SameLine();
-    if (iconButton(ICON_FOLDER_OPEN, "matgen_browse")) {
-        openDirPicker(&m.directory);
-    }
-    tooltip("gdc.common.browse");
+    bool dirty = directoryField("##matgen_directory", m.directory);
 
     ImGui::Separator();
 
@@ -636,26 +625,12 @@ void matGenTabUI()
 
     ImGui::Separator();
 
-    std::string status;
-    bool running;
     std::vector<std::string> logLines;
-    {
-        std::lock_guard lock(m.task.mu);
-        status = m.task.status;
-        running = m.task.running;
-        logLines = m.task.logLines;
+    if (taskButton(m.task, iconLabel(ICON_PLAY_ARROW, "gdc.matgen.generateMaterials", "matgen_run"),
+                   iconLabel(ICON_STOP, "gdc.matgen.stopGenerator", "matgen_run"), logLines) &&
+        !m.directory.empty()) {
+        startTask(m.task, tr("gdc.matgen.scanning"), [dir = m.directory, s] { runMatGen(dir, s); });
     }
-    if (running) {
-        if (ImGui::Button(iconLabel(ICON_STOP, "gdc.matgen.stopGenerator", "matgen_run").c_str())) {
-            m.task.stop = true;
-        }
-    } else if (ImGui::Button(iconLabel(ICON_PLAY_ARROW, "gdc.matgen.generateMaterials", "matgen_run").c_str()) &&
-               !m.directory.empty()) {
-        m.task.log("");
-        std::thread(runMatGen, m.directory, s).detach();
-    }
-    ImGui::SameLine();
-    ImGui::Text(tr("gdc.common.status"), status.empty() ? tr("gdc.common.waiting") : status.c_str());
 
     ImGui::Separator();
     logView("##matgen_log", logLines, 0, [](const std::string& line) {

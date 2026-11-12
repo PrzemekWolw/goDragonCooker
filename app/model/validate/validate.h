@@ -62,6 +62,4 @@ void checkStoredNames(ValidationReport& report, const std::vector<std::pair<std:
 // name used twice (it becomes "name.001"). `written` is the re-read scene.
 void checkImportNames(ValidationReport& report, const aiScene& written, bool gltf);
 
-Capabilities intersect(const Capabilities& a, const Capabilities& b);
-
 } // namespace model

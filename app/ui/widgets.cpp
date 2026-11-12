@@ -7,12 +7,17 @@
 #include "core/platform.h"
 #include "core/settings.h"
 #include "core/strings.h"
+#include "core/task.h"
 #include "imgui_stdlib.h"
 #include "ui/icons.h"
 #include "ui/theme.h"
 
 bool comboStrings(const char* id, int* index, const std::vector<std::string>& items, float width)
 {
+    if (items.empty()) {
+        return false;
+    }
+    *index = std::clamp(*index, 0, int(items.size()) - 1);
     bool changed = false;
     ImGui::SetNextItemWidth(width);
     if (ImGui::BeginCombo(id, tr(items[*index]))) {
@@ -150,6 +155,39 @@ void renderDirPicker()
         }
     }
     ImGui::End();
+}
+
+bool directoryField(const char* id, std::string& dir)
+{
+    const bool edited = ImGui::InputText(id, &dir);
+    ImGui::SameLine();
+    if (iconButton(ICON_FOLDER_OPEN, (std::string(id) + "_browse").c_str())) {
+        openDirPicker(&dir);
+    }
+    tooltip("gdc.common.browse");
+    return edited;
+}
+
+bool taskButton(TaskState& task, const std::string& runLabel, const std::string& stopLabel, std::vector<std::string>& logLines)
+{
+    std::string status;
+    bool running;
+    {
+        std::lock_guard lock(task.mu);
+        status = task.status;
+        running = task.running;
+        logLines = task.logLines;
+    }
+    bool run = false;
+    if (running) {
+        if (ImGui::Button(stopLabel.c_str())) {
+            task.stop = true;
+        }
+    } else {
+        run = ImGui::Button(runLabel.c_str());
+    }
+    ImGui::Text(tr("gdc.common.status"), status.empty() ? tr("gdc.common.waiting") : status.c_str());
+    return run;
 }
 
 // ---------------------------------------------------------------------------

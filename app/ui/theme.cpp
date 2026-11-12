@@ -16,21 +16,7 @@ float px(float value)
     return sign * std::max(1.0f, std::round(std::fabs(value) * uiScale));
 }
 
-static float snap(float value, float scale)
-{
-    if (value == 0.0f) {
-        return 0.0f;
-    }
-    const float sign = value < 0.0f ? -1.0f : 1.0f;
-    return sign * std::max(1.0f, std::round(std::fabs(value) * scale));
-}
-
-static ImVec2 snap(const ImVec2& value, float scale)
-{
-    return ImVec2(snap(value.x, scale), snap(value.y, scale));
-}
-
-void applyTheme(float scale)
+void applyTheme()
 {
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
@@ -102,56 +88,24 @@ void applyTheme(float scale)
     style.TabRounding = 2.0f;
 
     // Nearest pixel. ImGui's ScaleAllSizes truncates, so a 1px padding stays 1 at 1.75x.
-    style.WindowPadding = snap(style.WindowPadding, scale);
-    style.WindowRounding = snap(style.WindowRounding, scale);
-    style.WindowBorderSize = snap(style.WindowBorderSize, scale);
-    style.WindowMinSize = snap(style.WindowMinSize, scale);
-    style.WindowBorderHoverPadding = snap(style.WindowBorderHoverPadding, scale);
-    style.ChildRounding = snap(style.ChildRounding, scale);
-    style.ChildBorderSize = snap(style.ChildBorderSize, scale);
-    style.PopupRounding = snap(style.PopupRounding, scale);
-    style.PopupBorderSize = snap(style.PopupBorderSize, scale);
-    style.FramePadding = snap(style.FramePadding, scale);
-    style.FrameBorderSize = snap(style.FrameBorderSize, scale);
-    style.FrameRounding = snap(style.FrameRounding, scale);
-    style.ItemSpacing = snap(style.ItemSpacing, scale);
-    style.ItemInnerSpacing = snap(style.ItemInnerSpacing, scale);
-    style.CellPadding = snap(style.CellPadding, scale);
-    style.TouchExtraPadding = snap(style.TouchExtraPadding, scale);
-    style.IndentSpacing = snap(style.IndentSpacing, scale);
-    style.ColumnsMinSpacing = snap(style.ColumnsMinSpacing, scale);
-    style.ScrollbarSize = snap(style.ScrollbarSize, scale);
-    style.ScrollbarRounding = snap(style.ScrollbarRounding, scale);
-    style.ScrollbarPadding = snap(style.ScrollbarPadding, scale);
-    style.GrabMinSize = snap(style.GrabMinSize, scale);
-    style.GrabRounding = snap(style.GrabRounding, scale);
-    style.LogSliderDeadzone = snap(style.LogSliderDeadzone, scale);
-    style.ImageRounding = snap(style.ImageRounding, scale);
-    style.ImageBorderSize = snap(style.ImageBorderSize, scale);
-    style.TabRounding = snap(style.TabRounding, scale);
-    style.TabBorderSize = snap(style.TabBorderSize, scale);
-    style.TabMinWidthBase = snap(style.TabMinWidthBase, scale);
-    style.TabMinWidthShrink = snap(style.TabMinWidthShrink, scale);
-    style.TabBarBorderSize = snap(style.TabBarBorderSize, scale);
-    style.TabBarOverlineSize = snap(style.TabBarOverlineSize, scale);
-    style.TreeLinesSize = snap(style.TreeLinesSize, scale);
-    style.TreeLinesRounding = snap(style.TreeLinesRounding, scale);
-    style.MenuItemRounding = snap(style.MenuItemRounding, scale);
-    style.SelectableRounding = snap(style.SelectableRounding, scale);
-    style.DragDropTargetRounding = snap(style.DragDropTargetRounding, scale);
-    style.DragDropTargetBorderSize = snap(style.DragDropTargetBorderSize, scale);
-    style.DragDropTargetPadding = snap(style.DragDropTargetPadding, scale);
-    style.ColorMarkerSize = snap(style.ColorMarkerSize, scale);
-    style.InputTextCursorSize = snap(style.InputTextCursorSize, scale);
-    style.SeparatorSize = snap(style.SeparatorSize, scale);
-    style.SeparatorTextBorderSize = snap(style.SeparatorTextBorderSize, scale);
-    style.SeparatorTextPadding = snap(style.SeparatorTextPadding, scale);
-    style.DisplayWindowPadding = snap(style.DisplayWindowPadding, scale);
-    style.DisplaySafeAreaPadding = snap(style.DisplaySafeAreaPadding, scale);
-    style.MouseCursorScale = snap(style.MouseCursorScale, scale);
+    using S = ImGuiStyle;
+    for (float S::*f : {&S::WindowRounding, &S::WindowBorderSize, &S::WindowBorderHoverPadding, &S::ChildRounding, &S::ChildBorderSize,
+                        &S::PopupRounding, &S::PopupBorderSize, &S::FrameBorderSize, &S::FrameRounding, &S::IndentSpacing,
+                        &S::ColumnsMinSpacing, &S::ScrollbarSize, &S::ScrollbarRounding, &S::ScrollbarPadding, &S::GrabMinSize,
+                        &S::GrabRounding, &S::LogSliderDeadzone, &S::ImageRounding, &S::ImageBorderSize, &S::TabRounding,
+                        &S::TabBorderSize, &S::TabMinWidthBase, &S::TabMinWidthShrink, &S::TabBarBorderSize, &S::TabBarOverlineSize,
+                        &S::TreeLinesSize, &S::TreeLinesRounding, &S::MenuItemRounding, &S::SelectableRounding,
+                        &S::DragDropTargetRounding, &S::DragDropTargetBorderSize, &S::DragDropTargetPadding, &S::ColorMarkerSize,
+                        &S::InputTextCursorSize, &S::SeparatorSize, &S::SeparatorTextBorderSize, &S::MouseCursorScale}) {
+        style.*f = px(style.*f);
+    }
+    for (ImVec2 S::*v : {&S::WindowPadding, &S::WindowMinSize, &S::FramePadding, &S::ItemSpacing, &S::ItemInnerSpacing, &S::CellPadding,
+                         &S::TouchExtraPadding, &S::SeparatorTextPadding, &S::DisplayWindowPadding, &S::DisplaySafeAreaPadding}) {
+        style.*v = ImVec2(px((style.*v).x), px((style.*v).y));
+    }
 
     style.FontSizeBase = 18.7f;
-    style.FontScaleDpi = scale;
+    style.FontScaleDpi = uiScale;
 }
 
 static fs::path findFont(const char* name)

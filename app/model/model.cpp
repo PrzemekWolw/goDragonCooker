@@ -290,11 +290,7 @@ bool Model::load(const std::string& path, std::string& error, std::vector<std::s
             }
             repaired = text;
         }
-        const size_t p = text.find("<up_axis>");
-        if (p != std::string::npos) {
-            const std::string v = text.substr(p + 9, 16);
-            up = v.find("Y_UP") != std::string::npos ? UpAxis::Y : v.find("X_UP") != std::string::npos ? UpAxis::X : UpAxis::Z;
-        }
+        up = colladaUpAxis(text, UpAxis::Z);
         mergeAnimations = text.find("<animation_clip") == std::string::npos;
     }
 
@@ -351,19 +347,17 @@ const ts::Shape* Model::shape(const ts::AiToTsOptions& options, std::vector<std:
         error = "no model loaded";
         return nullptr;
     }
-    if (convertedShape && sameOptions(options, convertedShapeOptions)) {
-        warnings.insert(warnings.end(), convertedShapeWarnings.begin(), convertedShapeWarnings.end());
-        return &*convertedShape;
+    if (!convertedShape || !sameOptions(options, convertedShapeOptions)) {
+        ts::Shape shape;
+        std::vector<std::string> w;
+        if (!ts::assimpToShape(*loadedScene, options, shape, w, error)) {
+            return nullptr;
+        }
+        convertedShape = std::move(shape);
+        convertedShapeOptions = options;
+        convertedShapeWarnings = std::move(w);
     }
-    ts::Shape shape;
-    std::vector<std::string> w;
-    if (!ts::assimpToShape(*loadedScene, options, shape, w, error)) {
-        return nullptr;
-    }
-    convertedShape = std::move(shape);
-    convertedShapeOptions = options;
-    convertedShapeWarnings = w;
-    warnings.insert(warnings.end(), w.begin(), w.end());
+    warnings.insert(warnings.end(), convertedShapeWarnings.begin(), convertedShapeWarnings.end());
     return &*convertedShape;
 }
 
@@ -375,15 +369,12 @@ const aiScene* Model::scene(const ts::TsToAiOptions& options, std::vector<std::s
     if (!loadedShape) {
         return nullptr;
     }
-    if (convertedScene && sameOptions(options, convertedSceneOptions)) {
-        warnings.insert(warnings.end(), convertedSceneWarnings.begin(), convertedSceneWarnings.end());
-        return convertedScene.get();
+    if (!convertedScene || !sameOptions(options, convertedSceneOptions)) {
+        convertedSceneWarnings.clear();
+        convertedScene.reset(ts::shapeToAssimp(*loadedShape, options, convertedSceneWarnings));
+        convertedSceneOptions = options;
     }
-    std::vector<std::string> w;
-    convertedScene.reset(ts::shapeToAssimp(*loadedShape, options, w));
-    convertedSceneOptions = options;
-    convertedSceneWarnings = w;
-    warnings.insert(warnings.end(), w.begin(), w.end());
+    warnings.insert(warnings.end(), convertedSceneWarnings.begin(), convertedSceneWarnings.end());
     return convertedScene.get();
 }
 

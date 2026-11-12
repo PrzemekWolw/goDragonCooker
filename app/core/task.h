@@ -24,6 +24,9 @@ struct TaskState {
     void finish(const std::string& status);
 };
 
+// Begins `task` on the calling (UI) thread, so a second click cannot start it twice, then runs `work` detached.
+void startTask(TaskState& task, const std::string& status, std::function<void()> work);
+
 // Runs work(i) for i in [0, count) on up to `workers` threads, stopping early when the task is cancelled.
 // record(i, error) is serialized.
 void runPool(size_t count, unsigned workers, TaskState& task, const std::function<std::string(size_t)>& work,

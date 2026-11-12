@@ -334,6 +334,7 @@ def run(
     check: bool = True,
     cwd: Path | None = None,
     drop_env: tuple[str, ...] = (),
+    echo: bool = False,
 ) -> subprocess.CompletedProcess:
     full_env = {**os.environ, **(env or {})}
     for key in drop_env:
@@ -355,7 +356,21 @@ def run(
             if line.strip():
                 log(f"  {line}", error=True)
         sys.exit(result.returncode)
+    if echo:
+        for line in ((result.stdout or "") + (result.stderr or "")).splitlines():
+            if line.strip():
+                log(f"  {line}", info=False)
     return result
+
+
+def cmake_drop_env(command: list[str]) -> tuple[str, ...]:
+    return MSVC_CONFIG_ENV_DROP if any(part.startswith("Visual Studio") for part in command) else ()
+
+
+def fresh_dir(path: Path) -> Path:
+    if path.exists():
+        remove_tree(path)
+    return path
 
 
 X86_64_V3 = True
@@ -863,9 +878,7 @@ def build_vulkan(targets: list[dict], skip: bool):
         build_dir = PROJECT / ".build" / f"vulkan-{target['name']}"
         install_dir = PROJECT / ".build" / f"vulkan-install-{target['name']}"
         build_dir.mkdir(parents=True, exist_ok=True)
-        if install_dir.exists():
-            remove_tree(install_dir)
-        install_dir.mkdir(parents=True, exist_ok=True)
+        fresh_dir(install_dir).mkdir(parents=True, exist_ok=True)
         msvc_arm64 = (
             target["platform"] == "windows" and target["goarch"] == "arm64"
         )
@@ -927,9 +940,7 @@ def build_vulkan(targets: list[dict], skip: bool):
         if cache.is_file() and "msys64" in cache.read_text(encoding="utf-8", errors="replace").lower():
             log(f"  Removing {build_dir.name} configured against MinGW libraries")
             remove_tree(build_dir)
-        reset_stale_cmake_generator(build_dir, configure)
-        run(configure, env=env, drop_env=MSVC_CONFIG_ENV_DROP if msvc_arm64 else ())
-        run(["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", str(CPU_THREADS)], env=env)
+        cmake_configure_build(build_dir, configure, env)
         run([
             "cmake", "--install", str(build_dir), "--config", "Release",
             "--component", "gdc_vulkan_runtime",
@@ -1039,6 +1050,17 @@ def reset_stale_cmake_generator(build_dir: Path, command: list[str]):
         remove_tree(build_dir)
 
 
+def cmake_configure_build(build_dir: Path, command: list[str], env: dict[str, str], *build_args: str):
+    drop_env = cmake_drop_env(command)
+    reset_stale_cmake_generator(build_dir, command)
+    run(command, env=env, drop_env=drop_env)
+    run(
+        ["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", str(CPU_THREADS), *build_args],
+        env=env,
+        drop_env=drop_env,
+    )
+
+
 def visual_studio_generator() -> str:
     """Newest Visual Studio CMake generator installed on this machine.
 
@@ -1116,16 +1138,7 @@ def build_target(target: dict, upx: bool, upx_threads: bool, sources: list[Path]
 
     log(f"Building {name}...")
     command, env, build_dir = app_cmake_command(target)
-    reset_stale_cmake_generator(build_dir, command)
-    drop_env = MSVC_CONFIG_ENV_DROP if any(
-        part.startswith("Visual Studio") for part in command
-    ) else ()
-    run(command, env=env, drop_env=drop_env)
-    run(
-        ["cmake", "--build", str(build_dir), "--config", "Release", "--parallel", str(CPU_THREADS)],
-        env=env,
-        drop_env=drop_env,
-    )
+    cmake_configure_build(build_dir, command, env)
 
     binary.parent.mkdir(parents=True, exist_ok=True)
     tmp_binary = binary.parent / f".build_{name}{binary.suffix}"
@@ -1175,34 +1188,9 @@ def host_can_run(target: dict) -> bool:
 
 def build_self_test_binaries(target: dict) -> dict[str, Path]:
     command, env, build_dir = app_cmake_command(target)
-    drop_env = MSVC_CONFIG_ENV_DROP if any(
-        part.startswith("Visual Studio") for part in command
-    ) else ()
-    reset_stale_cmake_generator(build_dir, command)
-    run(command, env=env, drop_env=drop_env)
-    run(
-        [
-            "cmake", "--build", str(build_dir), "--config", "Release",
-            "--parallel", str(CPU_THREADS),
-            "--target", "gdc_i18n_test",
-            "--target", "gdc_model_test",
-            "--target", "gdc_cook_test",
-        ],
-        env=env,
-        drop_env=drop_env,
-    )
-    return {
-        name: built_named_binary(build_dir, target, name)
-        for name in ("gdc_i18n_test", "gdc_model_test", "gdc_cook_test")
-    }
-
-
-def run_report(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
-    result = run(cmd, **kwargs)
-    for line in ((result.stdout or "") + (result.stderr or "")).splitlines():
-        if line.strip():
-            log(f"  {line}", info=False)
-    return result
+    names = ("gdc_i18n_test", "gdc_model_test", "gdc_cook_test")
+    cmake_configure_build(build_dir, command, env, *(arg for name in names for arg in ("--target", name)))
+    return {name: built_named_binary(build_dir, target, name) for name in names}
 
 
 def run_self_tests(target: dict, stage: Path):
@@ -1219,46 +1207,27 @@ def run_self_tests(target: dict, stage: Path):
 
     binaries = build_self_test_binaries(target)
     log(f"Self-test {target['name']}")
-    run_report([str(binaries["gdc_i18n_test"])])
+    run([str(binaries["gdc_i18n_test"])], echo=True)
 
-    converted = PROJECT / ".build" / f"selftest-model-{target['name']}"
-    if converted.exists():
-        remove_tree(converted)
-    run_report([
-        str(binaries["gdc_model_test"]),
-        "--convert", "glb,glb-draco,dae,cdae,dts",
-        "--out", str(converted),
-        "--back",
-        str(model),
-    ])
+    def work_dir(kind: str) -> Path:
+        return fresh_dir(PROJECT / ".build" / f"selftest-{kind}-{target['name']}")
+
+    model_test = str(binaries["gdc_model_test"])
+    converted = work_dir("model")
+    run([model_test, "--convert", "glb,glb-draco,dae,cdae,dts", "--out", str(converted), "--back", str(model)], echo=True)
     hierarchy = data / "hierarchy.dae"
-    hier_out = PROJECT / ".build" / f"selftest-hierarchy-{target['name']}"
-    if hier_out.exists():
-        remove_tree(hier_out)
-    run_report([
-        str(binaries["gdc_model_test"]),
-        "--convert", "glb,dae,fbx,obj,x,cdae,dts",
-        "--out", str(hier_out),
-        "--back",
-        str(hierarchy),
-    ])
-    run_report([str(binaries["gdc_model_test"]), "--corrupt-structure", "--out", str(hier_out), str(hierarchy)])
+    hier_out = work_dir("hierarchy")
+    run([model_test, "--convert", "glb,dae,fbx,obj,x,cdae,dts", "--out", str(hier_out), "--back", str(hierarchy)], echo=True)
+    run([model_test, "--corrupt-structure", "--out", str(hier_out), str(hierarchy)], echo=True)
     caps_out = hier_out / "caps"
     caps_out.mkdir(parents=True, exist_ok=True)
-    run_report([str(binaries["gdc_model_test"]), "--caps", "--out", str(caps_out), str(hierarchy)])
+    run([model_test, "--caps", "--out", str(caps_out), str(hierarchy)], echo=True)
 
     cook = str(binaries["gdc_cook_test"])
-    cooked = PROJECT / ".build" / f"selftest-cook-{target['name']}"
-    if cooked.exists():
-        remove_tree(cooked)
-    run_report([
-        cook, "--work", str(cooked),
-        f"color:{image}", f"normal:{image}", f"dataR:{image}",
-    ], cwd=stage)
-    corrupted = PROJECT / ".build" / f"selftest-cook-corrupt-{target['name']}"
-    if corrupted.exists():
-        remove_tree(corrupted)
-    run_report([cook, "--work", str(corrupted), "--corrupt", f"color:{image}"], cwd=stage)
+    cooked = work_dir("cook")
+    run([cook, "--work", str(cooked), f"color:{image}", f"normal:{image}", f"dataR:{image}"], cwd=stage, echo=True)
+    corrupted = work_dir("cook-corrupt")
+    run([cook, "--work", str(corrupted), "--corrupt", f"color:{image}"], cwd=stage, echo=True)
     log(f"Self-test {target['name']} passed")
 
 
@@ -1284,9 +1253,7 @@ def package_target(target: dict, run_tests: bool = False):
         sys.exit(1)
 
     DIST_DIR.mkdir(exist_ok=True)
-    stage = DIST_DIR / target["name"]
-    if stage.exists():
-        remove_tree(stage)
+    stage = fresh_dir(DIST_DIR / target["name"])
     stage.mkdir()
     stage_bin = stage / "bin" / target["name"]
     stage_bin.mkdir(parents=True)

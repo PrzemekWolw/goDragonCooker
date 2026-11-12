@@ -1,13 +1,10 @@
 #include "model/gltf_root.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cstring>
-#include <vector>
-
-#include <nlohmann/json.hpp>
 
 #include "core/platform.h"
+#include "core/strings.h"
 #include "model/model.h"
 #include "model/ts/ts_io.h"
 
@@ -18,6 +15,7 @@ using json = nlohmann::json;
 
 constexpr uint32_t kGlbMagic = 0x46546C67; // "glTF"
 constexpr uint32_t kChunkJson = 0x4E4F534A;
+constexpr uint32_t kChunkBin = 0x004E4942;
 
 uint32_t readU32(const uint8_t* p)
 {
@@ -32,20 +30,20 @@ void appendU32(std::vector<uint8_t>& out, uint32_t v)
     out.insert(out.end(), p, p + 4);
 }
 
-bool startsWithCi(const json& name, const std::string& prefix)
+bool nameStartsWith(const json& node, const char* prefix)
 {
-    const std::string s = name.is_string() ? name.get<std::string>() : std::string();
-    return s.size() >= prefix.size() && std::equal(prefix.begin(), prefix.end(), s.begin(), [](char a, char b) { return a == std::tolower(static_cast<unsigned char>(b)); });
+    const json name = node.value("name", json());
+    return name.is_string() && hasPrefixI(name.get<std::string>(), prefix);
 }
 
 // A base* node with a start* child is where the game reads detail levels; it is a node, not a container.
 bool isBaseStart(const json& g, const json& node)
 {
-    if (!startsWithCi(node.value("name", json()), "base")) {
+    if (!nameStartsWith(node, "base")) {
         return false;
     }
     for (const json& child : node.value("children", json::array())) {
-        if (startsWithCi(g["nodes"][child.get<size_t>()].value("name", json()), "start")) {
+        if (nameStartsWith(g["nodes"][child.get<size_t>()], "start")) {
             return true;
         }
     }
@@ -145,55 +143,77 @@ bool restoreNodeNames(json& g)
 
 } // namespace
 
-bool gltfDropEmptyRoot(const std::string& path, std::string& error)
+bool readGltfFile(const std::string& path, GltfFile& file, std::string& error)
 {
     std::vector<uint8_t> bytes;
-    if (!ts::readFileBytes(path, bytes, error)) {
+    if (!readFileBytes(path, bytes, error)) {
         return false;
     }
-    const bool glb = bytes.size() >= 12 && readU32(bytes.data()) == kGlbMagic;
-    std::vector<uint8_t> tail; // chunks after the JSON one
     std::string text;
-    if (glb) {
-        if (bytes.size() < 20 || readU32(&bytes[16]) != kChunkJson || 20 + readU32(&bytes[12]) > bytes.size()) {
-            error = "invalid GLB";
-            return false;
+    file.glb = bytes.size() >= 12 && readU32(bytes.data()) == kGlbMagic;
+    if (file.glb) {
+        for (size_t p = 12; p + 8 <= bytes.size();) {
+            const uint32_t len = readU32(&bytes[p]);
+            const uint32_t type = readU32(&bytes[p + 4]);
+            if (p + 8 + len > bytes.size()) {
+                error = "truncated GLB chunk";
+                return false;
+            }
+            if (type == kChunkJson) {
+                text.assign(reinterpret_cast<const char*>(&bytes[p + 8]), len);
+            } else if (type == kChunkBin && file.bin.empty()) {
+                file.bin.assign(bytes.begin() + p + 8, bytes.begin() + p + 8 + len);
+            }
+            p += 8 + len;
         }
-        const size_t len = readU32(&bytes[12]);
-        text.assign(reinterpret_cast<const char*>(&bytes[20]), len);
-        tail.assign(bytes.begin() + 20 + len, bytes.end());
     } else {
         text.assign(bytes.begin(), bytes.end());
     }
-    json g = json::parse(text, nullptr, false);
-    if (g.is_discarded() || !g.is_object()) {
+    file.json = json::parse(text, nullptr, false);
+    if (file.json.is_discarded() || !file.json.is_object()) {
         error = "invalid glTF JSON";
         return false;
     }
-    const bool dropped = isEmptyRoot(g);
-    if (dropped) {
-        dropRoot(g);
-    }
-    const bool renamed = restoreNodeNames(g);
-    if (!dropped && !renamed) {
-        return true;
-    }
-    text = g.dump();
-    if (!glb) {
-        return ts::writeFileBytes(path, std::vector<uint8_t>(text.begin(), text.end()), error);
+    return true;
+}
+
+bool writeGltfFile(const std::string& path, const GltfFile& file, std::string& error)
+{
+    std::string text = file.json.dump();
+    if (!file.glb) {
+        return writeFileBytes(path, std::vector<uint8_t>(text.begin(), text.end()), error);
     }
     while (text.size() % 4) {
         text.push_back(' ');
     }
+    const size_t binChunk = file.bin.empty() ? 0 : 8 + file.bin.size();
     std::vector<uint8_t> out;
     appendU32(out, kGlbMagic);
     appendU32(out, 2);
-    appendU32(out, uint32_t(12 + 8 + text.size() + tail.size()));
+    appendU32(out, uint32_t(12 + 8 + text.size() + binChunk));
     appendU32(out, uint32_t(text.size()));
     appendU32(out, kChunkJson);
     out.insert(out.end(), text.begin(), text.end());
-    out.insert(out.end(), tail.begin(), tail.end());
-    return ts::writeFileBytes(path, out, error);
+    if (binChunk) {
+        appendU32(out, uint32_t(file.bin.size()));
+        appendU32(out, kChunkBin);
+        out.insert(out.end(), file.bin.begin(), file.bin.end());
+    }
+    return writeFileBytes(path, out, error);
+}
+
+bool gltfDropEmptyRoot(const std::string& path, std::string& error)
+{
+    GltfFile file;
+    if (!readGltfFile(path, file, error)) {
+        return false;
+    }
+    const bool dropped = isEmptyRoot(file.json);
+    if (dropped) {
+        dropRoot(file.json);
+    }
+    const bool renamed = restoreNodeNames(file.json);
+    return (!dropped && !renamed) || writeGltfFile(path, file, error);
 }
 
 } // namespace model

@@ -112,11 +112,8 @@ void i18nInit()
     language = systemLanguage();
     registerSettings(
         [](const SettingsJson& j) {
-            if (j.contains("language") && j["language"].is_string()) {
-                const int found = languageFromCode(j["language"].get<std::string>());
-                if (found >= 0) {
-                    language = found;
-                }
+            if (const int found = languageFromCode(j.value("language", "")); found >= 0) {
+                language = found;
             }
         },
         [](SettingsJson& j) { j["language"] = kLanguages[size_t(language.load())].code; });

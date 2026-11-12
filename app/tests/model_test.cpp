@@ -142,7 +142,7 @@ void testShapeFile(const std::string& path)
     std::string error;
     std::vector<std::string> warnings;
     std::vector<uint8_t> data;
-    if (!ts::readFileBytes(path, data, error)) {
+    if (!readFileBytes(path, data, error)) {
         report(path, "read", error);
         return;
     }

@@ -13,6 +13,7 @@
 
 #include "core/i18n.h"
 #include "core/strings.h"
+#include "model/assimp/ai_util.h"
 
 namespace model {
 namespace {
@@ -37,10 +38,23 @@ std::string listNames(const std::vector<std::string>& names, size_t total)
 
 void addLine(ValidationReport& rep, Verdict v, const std::string& text)
 {
-    if (int(v) > int(rep.verdict)) {
-        rep.verdict = v;
-    }
+    rep.verdict = std::max(rep.verdict, v);
     rep.lines.push_back(std::string(v == Verdict::Pass ? "" : v == Verdict::Warn ? "WARN " : "FAIL ") + text);
+}
+
+void syncVerdict(ValidationReport& rep) { rep.json["verdict"] = verdictName(rep.verdict); }
+
+// Keys of `counts` whose value passes `repeated`.
+template <class Map, class Pred>
+std::vector<std::string> keysWhere(const Map& counts, Pred repeated)
+{
+    std::vector<std::string> out;
+    for (const auto& [key, value] : counts) {
+        if (repeated(value)) {
+            out.push_back(key);
+        }
+    }
+    return out;
 }
 
 double angleDeg(const Vec3& a, const Vec3& b)
@@ -314,25 +328,6 @@ const char* verdictName(Verdict v)
     }
 }
 
-Capabilities intersect(const Capabilities& a, const Capabilities& b)
-{
-    Capabilities c;
-    c.hierarchy = a.hierarchy && b.hierarchy;
-    c.materials = a.materials && b.materials;
-    c.normals = a.normals && b.normals;
-    c.uv = a.uv && b.uv;
-    c.uv2 = a.uv2 && b.uv2;
-    c.colors = a.colors && b.colors;
-    c.tangents = a.tangents && b.tangents;
-    c.skins = a.skins && b.skins;
-    c.animations = a.animations && b.animations;
-    c.morphs = a.morphs && b.morphs;
-    c.lods = a.lods && b.lods;
-    c.meshNames = a.meshNames && b.meshNames;
-    c.poses = a.poses && b.poses;
-    return c;
-}
-
 Tolerance toleranceFor(const Format& target, const nlohmann::json& settings)
 {
     Tolerance t;
@@ -353,12 +348,7 @@ Tolerance toleranceFor(const Format& target, const nlohmann::json& settings)
 
 void checkUpAxis(ValidationReport& rep, UpAxis expected, const RawFrame& raw, const Summary& source)
 {
-    auto line = [&](Verdict v, const std::string& text) {
-        if (int(v) > int(rep.verdict)) {
-            rep.verdict = v;
-        }
-        rep.lines.push_back(std::string(v == Verdict::Pass ? "" : v == Verdict::Warn ? "WARN " : "FAIL ") + text);
-    };
+    auto line = [&](Verdict v, const std::string& text) { addLine(rep, v, text); };
     nlohmann::json& j = rep.json["upAxis"];
     j["expected"] = upAxisName(expected);
     auto axisLabel = [](UpAxis axis, bool negative) {
@@ -367,7 +357,7 @@ void checkUpAxis(ValidationReport& rep, UpAxis expected, const RawFrame& raw, co
     if (!raw.ok) {
         line(Verdict::Warn, format(tr("gdc.model.warn.upUnread"), raw.error.c_str()));
         j["checked"] = false;
-        rep.json["verdict"] = verdictName(rep.verdict);
+        syncVerdict(rep);
         return;
     }
     Verdict v = Verdict::Pass;
@@ -428,7 +418,7 @@ void checkUpAxis(ValidationReport& rep, UpAxis expected, const RawFrame& raw, co
     }
     line(v, text);
     j["verdict"] = verdictName(v);
-    rep.json["verdict"] = verdictName(rep.verdict);
+    syncVerdict(rep);
 }
 
 namespace {
@@ -456,32 +446,18 @@ void checkGameLod(ValidationReport& report, const aiScene& written, const aiScen
     if (!treeHasLodAnchor(source.mRootNode)) {
         return;
     }
-    if (!hierarchy) {
-        if (int(Verdict::Warn) > int(report.verdict)) {
-            report.verdict = Verdict::Warn;
-        }
-        report.lines.push_back(std::string("WARN ") + tr("gdc.model.warn.lodNoNames"));
-        report.json["lod"] = {{"source", true}, {"detected", false}};
-        report.json["verdict"] = verdictName(report.verdict);
-        return;
-    }
     const aiNode* root = written.mRootNode;
-    const char* seen = root ? root->mName.C_Str() : "";
-    const bool detected = isBaseStart(root) || lodAnchor(root);
-    auto raise = [&](Verdict v) {
-        if (int(v) > int(report.verdict)) {
-            report.verdict = v;
-        }
-    };
+    const bool detected = hierarchy && (isBaseStart(root) || lodAnchor(root));
     report.json["lod"] = {{"source", true}, {"detected", detected}};
-    if (!detected) {
-        raise(Verdict::Fail);
-        report.lines.push_back(std::string("FAIL ") +
-                               format(tr("gdc.model.warn.lodMissing"), seen[0] ? seen : tr("gdc.model.warn.unnamed")));
+    if (!hierarchy) {
+        addLine(report, Verdict::Warn, tr("gdc.model.warn.lodNoNames"));
+    } else if (!detected) {
+        const char* seen = root ? root->mName.C_Str() : "";
+        addLine(report, Verdict::Fail, format(tr("gdc.model.warn.lodMissing"), seen[0] ? seen : tr("gdc.model.warn.unnamed")));
     } else {
-        report.lines.push_back(tr("gdc.model.warn.lodOk"));
+        addLine(report, Verdict::Pass, tr("gdc.model.warn.lodOk"));
     }
-    report.json["verdict"] = verdictName(report.verdict);
+    syncVerdict(report);
 }
 
 void checkStoredNames(ValidationReport& report, const std::vector<std::pair<std::string, std::string>>& restored,
@@ -507,55 +483,39 @@ void checkStoredNames(ValidationReport& report, const std::vector<std::pair<std:
             ++uses[name.C_Str()];
         }
     }
-    std::vector<std::string> repeated;
-    size_t repeatedCount = 0;
-    for (const auto& [name, count] : uses) {
-        if (count > 1) {
-            ++repeatedCount;
-            repeated.push_back(name);
-        }
+    const std::vector<std::string> repeated = keysWhere(uses, [](size_t count) { return count > 1; });
+    report.json["storedNames"]["duplicateMaterials"] = repeated.size();
+    if (!repeated.empty()) {
+        addLine(report, Verdict::Warn, format(tr("gdc.model.warn.matRepeated"), repeated.size(), listNames(repeated, repeated.size()).c_str()));
     }
-    report.json["storedNames"]["duplicateMaterials"] = repeatedCount;
-    if (repeatedCount) {
-        addLine(report, Verdict::Warn, format(tr("gdc.model.warn.matRepeated"), repeatedCount, listNames(repeated, repeatedCount).c_str()));
-    }
-    report.json["verdict"] = verdictName(report.verdict);
+    syncVerdict(report);
 }
 
 void checkImportNames(ValidationReport& report, const aiScene& written, bool gltf)
 {
-    auto warn = [&](const char* id, size_t count, const std::vector<std::string>& names) {
-        addLine(report, Verdict::Warn, format(tr(id), count, listNames(names, count).c_str()));
-    };
     size_t problems = 0;
+    auto warn = [&](const char* id, const std::vector<std::string>& names) {
+        if (!names.empty()) {
+            addLine(report, Verdict::Warn, format(tr(id), names.size(), listNames(names, names.size()).c_str()));
+            ++problems;
+        }
+    };
 
     // Blender's glTF importer builds one material per vertex-color use ("name" and "name.001") when a material is
     // on primitives with and without COLOR_0.
     if (gltf) {
-        std::vector<char> colored(written.mNumMaterials, 0), plain(written.mNumMaterials, 0);
-        for (unsigned i = 0; i < written.mNumMeshes; ++i) {
-            const aiMesh* m = written.mMeshes[i];
-            if (m->mMaterialIndex < written.mNumMaterials) {
-                (m->HasVertexColors(0) ? colored : plain)[m->mMaterialIndex] = 1;
-            }
-        }
+        std::vector<char> colored, plain;
+        vertexColorUse(written, colored, plain);
         std::vector<std::string> split;
-        size_t splitCount = 0;
         for (unsigned i = 0; i < written.mNumMaterials; ++i) {
             if (colored[i] && plain[i]) {
-                ++splitCount;
                 aiString name;
                 written.mMaterials[i]->Get(AI_MATKEY_NAME, name);
-                if (split.size() < kShown) {
-                    split.push_back(name.length ? name.C_Str() : format("#%u", i));
-                }
+                split.push_back(name.length ? name.C_Str() : format("#%u", i));
             }
         }
-        report.json["importNames"]["splitMaterials"] = splitCount;
-        if (splitCount) {
-            warn("gdc.model.warn.matSplit", splitCount, split);
-            ++problems;
-        }
+        report.json["importNames"]["splitMaterials"] = split.size();
+        warn("gdc.model.warn.matSplit", split);
     }
 
     // Blender keeps one name per object and per mesh, so a name used by two parts becomes "name.001".
@@ -577,38 +537,16 @@ void checkImportNames(ValidationReport& report, const aiScene& written, bool glt
     if (written.mRootNode) {
         walk(walk, written.mRootNode, true);
     }
-    std::vector<std::string> nodeNames, meshNames;
-    size_t nodeCount = 0, meshCount = 0;
-    for (const auto& [name, count] : nodeUses) {
-        if (count > 1) {
-            ++nodeCount;
-            if (nodeNames.size() < kShown) {
-                nodeNames.push_back(name);
-            }
-        }
-    }
-    for (const auto& [name, holders] : meshHolders) {
-        if (holders.size() > 1) {
-            ++meshCount;
-            if (meshNames.size() < kShown) {
-                meshNames.push_back(name);
-            }
-        }
-    }
-    report.json["importNames"]["duplicateNodes"] = nodeCount;
-    report.json["importNames"]["duplicateMeshes"] = meshCount;
-    if (nodeCount) {
-        warn("gdc.model.warn.nodesRepeated", nodeCount, nodeNames);
-        ++problems;
-    }
-    if (meshCount) {
-        warn("gdc.model.warn.meshesRepeated", meshCount, meshNames);
-        ++problems;
-    }
+    const std::vector<std::string> nodeNames = keysWhere(nodeUses, [](size_t count) { return count > 1; });
+    const std::vector<std::string> meshNames = keysWhere(meshHolders, [](const auto& holders) { return holders.size() > 1; });
+    report.json["importNames"]["duplicateNodes"] = nodeNames.size();
+    report.json["importNames"]["duplicateMeshes"] = meshNames.size();
+    warn("gdc.model.warn.nodesRepeated", nodeNames);
+    warn("gdc.model.warn.meshesRepeated", meshNames);
     if (!problems) {
         report.lines.push_back(tr("gdc.model.warn.importNamesOk"));
     }
-    report.json["verdict"] = verdictName(report.verdict);
+    syncVerdict(report);
 }
 
 namespace {
@@ -893,15 +831,7 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
 {
     ValidationReport rep;
     nlohmann::json& j = rep.json;
-    auto raise = [&](Verdict v) {
-        if (int(v) > int(rep.verdict)) {
-            rep.verdict = v;
-        }
-    };
-    auto line = [&](Verdict v, const std::string& text) {
-        raise(v);
-        rep.lines.push_back(std::string(v == Verdict::Pass ? "" : v == Verdict::Warn ? "WARN " : "FAIL ") + text);
-    };
+    auto line = [&](Verdict v, const std::string& text) { addLine(rep, v, text); };
 
     const double diag = std::max(double(src.diagonal()), 1e-6);
     const double posTol = tol.posRel * diag;
@@ -1368,7 +1298,7 @@ ValidationReport compareSummaries(const Summary& src, const Summary& dst, const 
         }
         j["animations"] = ja;
     }
-    j["verdict"] = verdictName(rep.verdict);
+    syncVerdict(rep);
     return rep;
 }
 

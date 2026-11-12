@@ -37,10 +37,7 @@ struct Quat {
 };
 
 Quat normalize(const Quat& q);
-Quat mul(const Quat& a, const Quat& b);
-Quat conjugate(const Quat& q);
 Quat slerp(Quat a, Quat b, float t);
-Vec3 rotate(const Quat& q, const Vec3& v);
 
 // Row-major 4x4 acting on column vectors (p' = M * p), same element layout as the engine's MatrixF.
 struct Mat4 {
@@ -59,6 +56,10 @@ Mat4 fromQuat(const Quat& q);
 // Splits an affine matrix into translation, rotation and per-axis scale (negative determinant goes to scale.z).
 void decompose(const Mat4& m, Vec3& t, Quat& r, Vec3& s);
 Quat quatFromMatrix(const Mat4& m);
+// Scale-free, de-reflected rotation + translation of a world matrix, as the engine stores nodes.
+Mat4 rigidPart(const Mat4& world);
+// Inverse transpose of the upper 3x3, for transforming normals.
+Mat4 normalMatrix(const Mat4& m);
 
 // Engine Quat16: 4 x int16 scaled by 0x7fff. The engine's QuatF builds the transpose of the
 // standard rotation matrix, so a stored (x,y,z,w) is the standard quaternion (-x,-y,-z,w).

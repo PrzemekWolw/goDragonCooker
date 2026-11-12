@@ -42,13 +42,7 @@ std::string vulkanInit()
     if (codec.loaded) {
         return "";
     }
-#if defined(_WIN32)
-    const fs::path path = findAsset("gdc_vulkan.dll");
-#elif defined(__APPLE__)
-    const fs::path path = findAsset("libgdc_vulkan.dylib");
-#else
-    const fs::path path = findAsset("libgdc_vulkan.so");
-#endif
+    const fs::path path = findLibrary("gdc_vulkan");
     if (path.empty()) {
         return "Compressonator Vulkan library not found";
     }

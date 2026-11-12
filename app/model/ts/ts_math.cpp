@@ -14,18 +14,6 @@ Quat normalize(const Quat& q)
     return {q.x * s, q.y * s, q.z * s, q.w * s};
 }
 
-Quat mul(const Quat& a, const Quat& b)
-{
-    return {
-        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
-        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
-        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
-        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
-    };
-}
-
-Quat conjugate(const Quat& q) { return {-q.x, -q.y, -q.z, q.w}; }
-
 Quat slerp(Quat a, Quat b, float t)
 {
     float c = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
@@ -41,13 +29,6 @@ Quat slerp(Quat a, Quat b, float t)
         s1 = std::sin(t * om) / so;
     }
     return normalize({a.x * s0 + b.x * s1, a.y * s0 + b.y * s1, a.z * s0 + b.z * s1, a.w * s0 + b.w * s1});
-}
-
-Vec3 rotate(const Quat& q, const Vec3& v)
-{
-    const Vec3 u{q.x, q.y, q.z};
-    const Vec3 t = cross(u, v) * 2.0f;
-    return v + t * q.w + cross(u, t);
 }
 
 Mat4 operator*(const Mat4& a, const Mat4& b)
@@ -163,6 +144,26 @@ Mat4 composeTRS(const Vec3& t, const Quat& r, const Vec3& s)
     m.at(1, 3) = t.y;
     m.at(2, 3) = t.z;
     return m;
+}
+
+Mat4 rigidPart(const Mat4& world)
+{
+    Vec3 t, s;
+    Quat r;
+    decompose(world, t, r, s);
+    return composeTRS(t, r, {1, 1, 1});
+}
+
+Mat4 normalMatrix(const Mat4& m)
+{
+    const Mat4 inv = inverse(m);
+    Mat4 t;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            t.at(r, c) = inv.at(c, r);
+        }
+    }
+    return t;
 }
 
 Quat quatFromMatrix(const Mat4& m)

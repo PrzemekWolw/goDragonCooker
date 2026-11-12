@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -13,89 +14,15 @@
 #include "core/i18n.h"
 #include "core/strings.h"
 #include "model/assimp/ai_bridge.h"
-#include "model/assimp/ai_meta.h"
+#include "model/assimp/ai_util.h"
 
 namespace ts {
 namespace {
 
 constexpr int kMaxBonesPerVertex = 16;
 
-Mat4 toMat4(const aiMatrix4x4& a)
-{
-    Mat4 m;
-    const float src[16] = {a.a1, a.a2, a.a3, a.a4, a.b1, a.b2, a.b3, a.b4, a.c1, a.c2, a.c3, a.c4, a.d1, a.d2, a.d3, a.d4};
-    std::memcpy(m.m, src, sizeof(src));
-    return m;
-}
-
-Vec3 toVec3(const aiVector3D& v) { return {v.x, v.y, v.z}; }
-
-// Scale-free, de-reflected rotation + translation of a node world matrix, as the engine stores nodes.
-Mat4 rigidPart(const Mat4& world, bool* mirrored = nullptr)
-{
-    Vec3 t, s;
-    Quat r;
-    decompose(world, t, r, s);
-    if (mirrored) {
-        *mirrored = determinant3(world) < 0.0f;
-    }
-    return composeTRS(t, r, {1, 1, 1});
-}
-
-Mat4 normalMatrix(const Mat4& m)
-{
-    Mat4 n = inverse(m);
-    Mat4 t;
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
-            t.at(r, c) = n.at(c, r);
-        }
-    }
-    return t;
-}
-
-bool startsWithI(const std::string& s, const char* prefix)
-{
-    const size_t n = std::strlen(prefix);
-    return s.size() >= n && lowerAscii(s.substr(0, n)) == lowerAscii(prefix);
-}
-
-std::string withSuffix(const std::string& base, int attempt)
-{
-    std::string candidate = base;
-    for (int v = attempt; v != 0; v >>= 4) {
-        candidate += char('A' + (v & 0xF));
-    }
-    return candidate;
-}
-
-bool isBaseStartNode(const aiNode* node)
-{
-    if (!node || !startsWithI(node->mName.C_Str(), "base")) {
-        return false;
-    }
-    for (unsigned i = 0; i < node->mNumChildren; ++i) {
-        if (startsWithI(node->mChildren[i]->mName.C_Str(), "start")) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // base* may be the scene root. glTF keeps a single scene node as the root, so base00 is not a child of anything.
-bool baseStartLayout(const aiScene& scene)
-{
-    const aiNode* root = scene.mRootNode;
-    if (isBaseStartNode(root)) {
-        return true;
-    }
-    for (unsigned i = 0; root && i < root->mNumChildren; ++i) {
-        if (isBaseStartNode(root->mChildren[i])) {
-            return true;
-        }
-    }
-    return false;
-}
+bool baseStartLayout(const aiScene& scene) { return isBaseStart(scene.mRootNode) || lodAnchor(scene.mRootNode); }
 
 struct NodeInfo {
     const aiNode* ai = nullptr;
@@ -143,15 +70,14 @@ struct Converter {
 
     void warn(const std::string& w) { warnings.push_back(w); }
 
-    bool isBaseStart(const aiNode* node) const { return isBaseStartNode(node); }
-
     void collectNodes(const aiNode* n, int parent, const Mat4& parentWorld)
     {
         NodeInfo info;
         info.ai = n;
         info.parent = parent;
         info.world = parentWorld * toMat4(n->mTransformation);
-        info.rigid = rigidPart(info.world, &info.mirrored);
+        info.rigid = rigidPart(info.world);
+        info.mirrored = determinant3(info.world) < 0.0f;
         const int self = int(nodes.size());
         nodes.push_back(info);
         infoOf[n] = self;
@@ -171,23 +97,15 @@ struct Converter {
             if ((isRoot && n->mNumMeshes == 0 && !isBaseStart(n)) || generatedNode(*n, collapseNames)) {
                 continue;
             }
-            int parentTs = -1;
-            const Mat4* parentRigid = nullptr;
-            for (int p = info.parent; p >= 0; p = nodes[p].parent) {
-                if (nodes[p].ts >= 0) {
-                    parentTs = nodes[p].ts;
-                    parentRigid = &nodes[p].rigid;
-                    break;
-                }
-            }
-            const Mat4 local = parentRigid ? inverse(*parentRigid) * info.rigid : info.rigid;
+            const int parent = shapeAncestor(info.parent);
+            const Mat4 local = parent >= 0 ? inverse(nodes[parent].rigid) * info.rigid : info.rigid;
             Vec3 t, s;
             Quat r;
             decompose(local, t, r, s);
             Node node;
             std::string name = n->mName.length ? n->mName.C_Str() : "node";
             node.nameIndex = shape.addName(uniqueName(name, taken));
-            node.parentIndex = parentTs;
+            node.parentIndex = parent >= 0 ? nodes[parent].ts : -1;
             info.ts = int(shape.nodes.size());
             shape.nodes.push_back(node);
             shape.defaultRotations.push_back(toQuat16(r));
@@ -212,7 +130,7 @@ struct Converter {
             if (size == std::numeric_limits<int>::min()) {
                 continue;
             }
-            if (startsWithI(name, "bb_") || startsWithI(name, "bb::") || startsWithI(name, "bbz_") || startsWithI(name, "bbz::")) {
+            if (hasPrefixI(name, "bb_") || hasPrefixI(name, "bb::") || hasPrefixI(name, "bbz_") || hasPrefixI(name, "bbz::")) {
                 if (size > 0) {
                     billboardMarkers[size] = name;
                 }
@@ -230,7 +148,7 @@ struct Converter {
             const NodeInfo& info = nodes[i];
             const std::string& unique = mn.object;
             const int size = mn.size;
-            const std::string key = lowerAscii(unique);
+            const std::string key = toLower(unique);
             auto it = byName.find(key);
             if (it == byName.end()) {
                 it = byName.emplace(key, int(objects.size())).first;
@@ -271,14 +189,19 @@ struct Converter {
         return index;
     }
 
+    // Nearest NodeInfo at or above info that became a shape node.
+    int shapeAncestor(int info) const
+    {
+        while (info >= 0 && nodes[info].ts < 0) {
+            info = nodes[info].parent;
+        }
+        return info;
+    }
+
     int tsNodeOf(int info) const
     {
-        for (int p = info; p >= 0; p = nodes[p].parent) {
-            if (nodes[p].ts >= 0) {
-                return nodes[p].ts;
-            }
-        }
-        return -1;
+        const int p = shapeAncestor(info);
+        return p >= 0 ? nodes[p].ts : -1;
     }
 
     static void computeNormals(Mesh& m, size_t first, size_t count, const std::vector<uint32_t>& tris)
@@ -351,9 +274,9 @@ struct Converter {
             anyColor = anyColor || am->HasVertexColors(0);
         }
         m.type = skin ? MeshType::Skin : MeshType::Standard;
-        if (startsWithI(ob.name, "BB_") || startsWithI(ob.name, "BB::")) {
+        if (hasPrefixI(ob.name, "bb_") || hasPrefixI(ob.name, "bb::")) {
             m.flags |= Billboard;
-        } else if (startsWithI(ob.name, "BBZ_") || startsWithI(ob.name, "BBZ::")) {
+        } else if (hasPrefixI(ob.name, "bbz_") || hasPrefixI(ob.name, "bbz::")) {
             m.flags |= Billboard | BillboardZAxis;
         }
 
@@ -399,7 +322,6 @@ struct Converter {
         std::vector<Vec3> verts, norms;
         std::vector<std::vector<Vec3>> frameVerts(static_cast<size_t>(morphTargets));
         std::vector<std::vector<Vec3>> frameNorms(static_cast<size_t>(morphTargets));
-        bool missingNormals = false, missingTangents = false;
         std::vector<std::pair<size_t, size_t>> needNormals, needTangents;
         std::vector<uint32_t> allTris;
 
@@ -430,13 +352,7 @@ struct Converter {
                     m.tverts2.push_back(uv1);
                 }
                 if (anyColor) {
-                    Color8 c;
-                    if (am->HasVertexColors(0)) {
-                        const aiColor4D& vc = am->mColors[0][v];
-                        auto b = [](float x) { return uint8_t(std::clamp(x * 255.0f + 0.5f, 0.0f, 255.0f)); };
-                        c = {b(vc.r), b(vc.g), b(vc.b), b(vc.a)};
-                    }
-                    m.colors.push_back(c);
+                    m.colors.push_back(am->HasVertexColors(0) ? toColor8(am->mColors[0][v]) : Color8{});
                 }
                 Vec4 tangent{1, 0, 0, 1};
                 if (am->HasTangentsAndBitangents() && am->mNormals) {
@@ -456,13 +372,6 @@ struct Converter {
                     frameNorms[f].push_back(hasN ? normalize(mulVector(nrmMat, toVec3(morph->mNormals[v]))) : norms[base + v]);
                 }
             }
-            if (!am->mNormals) {
-                missingNormals = true;
-            }
-            if (!am->HasTangentsAndBitangents() || !am->mNormals) {
-                missingTangents = true;
-            }
-
             Primitive prim;
             prim.start = int32_t(m.indices.size());
             std::vector<uint32_t> tris;
@@ -521,9 +430,6 @@ struct Converter {
                 }
             }
         }
-        (void)missingNormals;
-        (void)missingTangents;
-
         m.verts = verts;
         m.norms = norms;
         for (const auto& [first, count] : needNormals) {
@@ -757,32 +663,6 @@ struct Converter {
         return clips;
     }
 
-    template <class Key, class V>
-    static V sampleKeys(const Key* keys, unsigned count, double tps, double t, const V& absent)
-    {
-        if (!count) {
-            return absent;
-        }
-        const Key* next = std::lower_bound(keys + 1, keys + count, t, [tps](const Key& k, double time) { return k.mTime / tps < time; });
-        if (next == keys + count) {
-            return keys[count - 1].mValue;
-        }
-        const Key* prev = next - 1;
-        const double t0 = prev->mTime / tps, t1 = next->mTime / tps;
-        if (t <= t0 || t1 <= t0) {
-            return prev->mValue;
-        }
-        const float f = float((t - t0) / (t1 - t0));
-        if constexpr (std::is_same_v<V, aiQuaternion>) {
-            aiQuaternion out;
-            aiQuaternion::Interpolate(out, prev->mValue, next->mValue, f);
-            out.Normalize();
-            return out;
-        } else {
-            return prev->mValue + (next->mValue - prev->mValue) * f;
-        }
-    }
-
     Mat4 animatedLocal(const aiNode* n, const Clip& clip, double t) const
     {
         auto it = clip.byNode.find(n);
@@ -875,7 +755,7 @@ struct Converter {
             seq.priority = 5;
             seq.duration = duration;
             seq.numKeyframes = numKeyframes;
-            bool anyAligned = false, anyUniform = false;
+            bool anyAligned = false;
             auto approx = [](float a, float b) { return std::fabs(a - b) <= 1e-4f; };
             if (numKeyframes > 1) {
                 for (size_t tsn = 0; tsn < numNodes; ++tsn) {
@@ -899,11 +779,7 @@ struct Converter {
                         if (approx(s.x, 1) && approx(s.y, 1) && approx(s.z, 1)) {
                             continue;
                         }
-                        if (approx(s.x, s.y) && approx(s.y, s.z)) {
-                            anyUniform = true;
-                        } else {
-                            anyAligned = true;
-                        }
+                        anyAligned = anyAligned || !approx(s.x, s.y) || !approx(s.y, s.z);
                         seq.scaleMatters.set(int(tsn));
                         break;
                     }
@@ -920,7 +796,6 @@ struct Converter {
                              : mode == ScaleMode::Aligned ? uint32_t(SequenceFlag::AlignedScale)
                                                           : uint32_t(SequenceFlag::ArbitraryScale);
             }
-            (void)anyUniform;
 
             seq.baseRotation = int32_t(shape.nodeRotations.size());
             seq.baseTranslation = int32_t(shape.nodeTranslations.size());
@@ -960,22 +835,22 @@ struct Converter {
             }
 
             // Morph weights pick the dominant target per keyframe (TSShape frames are discrete).
-            for (const auto& [objIndex, targets] : morphObjects) {
-                const ObjectBuild& ob = objects[objIndex];
-                const aiMeshMorphAnim* ch = nullptr;
-                double tps = 1.0;
-                for (const MeshSource& s : ob.meshes) {
+            // objects[i] is shape object i.
+            auto morphChannel = [&](int objIndex) {
+                std::pair<const aiMeshMorphAnim*, double> found{nullptr, 1.0};
+                for (const MeshSource& s : objects[objIndex].meshes) {
                     auto it = clip.morphs.find(nodes[s.node].ai->mName.C_Str());
                     if (it != clip.morphs.end()) {
-                        ch = it->second.first;
-                        tps = it->second.second;
+                        found = it->second;
                     }
                 }
-                if (!ch || !ch->mNumKeys) {
-                    continue;
+                return found;
+            };
+            for (const auto& entry : morphObjects) {
+                const aiMeshMorphAnim* ch = morphChannel(entry.first).first;
+                if (ch && ch->mNumKeys) {
+                    seq.frameMatters.set(entry.first);
                 }
-                seq.frameMatters.set(ob.tsIndex);
-                (void)targets;
             }
             if (seq.frameMatters.any()) {
                 warn(format(tr("gdc.model.note.morphPop"), clip.name.c_str()));
@@ -983,21 +858,7 @@ struct Converter {
                     if (!seq.frameMatters.test(objIndex)) {
                         continue;
                     }
-                    const ObjectBuild* ob = nullptr;
-                    for (const ObjectBuild& o : objects) {
-                        if (o.tsIndex == objIndex) {
-                            ob = &o;
-                        }
-                    }
-                    const aiMeshMorphAnim* ch = nullptr;
-                    double tps = 1.0;
-                    for (const MeshSource& s : ob->meshes) {
-                        auto it = clip.morphs.find(nodes[s.node].ai->mName.C_Str());
-                        if (it != clip.morphs.end()) {
-                            ch = it->second.first;
-                            tps = it->second.second;
-                        }
-                    }
+                    const auto [ch, tps] = morphChannel(objIndex);
                     for (int f = 0; f < numKeyframes; ++f) {
                         const double t = numKeyframes > 1 ? double(duration) * f / (numKeyframes - 1) : 0.0;
                         const aiMeshMorphKey* key = ch->mKeys;
@@ -1085,7 +946,7 @@ struct Converter {
             for (const auto& js : meta["sequences"]) {
                 const std::string name = js.value("name", "");
                 for (Sequence& q : shape.sequences) {
-                    if (lowerAscii(shape.name(q.nameIndex)) != lowerAscii(name)) {
+                    if (toLower(shape.name(q.nameIndex)) != toLower(name)) {
                         continue;
                     }
                     const uint32_t keepScale = q.flags & 7u;
@@ -1118,16 +979,7 @@ struct Converter {
         for (unsigned k = 0; k < boundsNode->mNumMeshes; ++k) {
             const aiMesh* am = scene.mMeshes[boundsNode->mMeshes[k]];
             for (unsigned v = 0; v < am->mNumVertices; ++v) {
-                const Vec3 p = mulPoint(info.world, toVec3(am->mVertices[v]));
-                if (first) {
-                    shape.bounds.min = shape.bounds.max = p;
-                    first = false;
-                } else {
-                    shape.bounds.min = {std::min(shape.bounds.min.x, p.x), std::min(shape.bounds.min.y, p.y),
-                                        std::min(shape.bounds.min.z, p.z)};
-                    shape.bounds.max = {std::max(shape.bounds.max.x, p.x), std::max(shape.bounds.max.y, p.y),
-                                        std::max(shape.bounds.max.z, p.z)};
-                }
+                shape.bounds.extend(mulPoint(info.world, toVec3(am->mVertices[v])), first);
             }
         }
         if (!first) {
@@ -1179,20 +1031,24 @@ std::string splitTrailingNumber(const std::string& name, int& size)
     if (p == end) {
         return name;
     }
-    long long value = std::stoll(name.substr(p, std::min<size_t>(end - p, 9)));
+    int value = 0;
+    std::from_chars(name.data() + p, name.data() + p + std::min<size_t>(end - p, 9), value);
     if (p > 0 && name[p - 1] == '-') {
         --p;
         value = -value;
     }
-    size = int(value);
+    size = value;
     return name.substr(0, p);
 }
 
-std::string uniqueName(const std::string& base, std::unordered_set<std::string>& taken)
+std::string uniqueName(const std::string& base, std::unordered_set<std::string>& taken, const std::string& keySuffix)
 {
     for (int attempt = 0; attempt < 0x10000; ++attempt) {
-        const std::string candidate = withSuffix(base, attempt);
-        if (taken.insert(lowerAscii(candidate)).second) {
+        std::string candidate = base;
+        for (int v = attempt; v != 0; v >>= 4) {
+            candidate += char('A' + (v & 0xF));
+        }
+        if (taken.insert(toLower(candidate) + keySuffix).second) {
             return candidate;
         }
     }
@@ -1204,7 +1060,7 @@ bool generatedNode(const aiNode& node, const std::unordered_set<std::string>& co
     if (!collapse.count(node.mName.C_Str())) {
         return false;
     }
-    const std::string lower = lowerAscii(node.mName.C_Str());
+    const std::string lower = toLower(node.mName.C_Str());
     return (node.mNumMeshes && !node.mNumChildren) || lower == "base01" || lower == "start01";
 }
 
@@ -1237,7 +1093,7 @@ ObjectNaming objectNaming(const aiScene& scene, const AiToTsOptions& opt)
         }
     }
     for (unsigned i = 0; i < scene.mRootNode->mNumChildren; ++i) {
-        if (lowerAscii(scene.mRootNode->mChildren[i]->mName.C_Str()) == "bounds") {
+        if (toLower(scene.mRootNode->mChildren[i]->mName.C_Str()) == "bounds") {
             out.boundsNode = scene.mRootNode->mChildren[i];
             break;
         }
@@ -1277,14 +1133,7 @@ ObjectNaming objectNaming(const aiScene& scene, const AiToTsOptions& opt)
             int size = 2;
             derive(n, name, size);
             // A second mesh at an occupied (name, size) is a different object, not a LOD.
-            std::string unique = name;
-            for (int attempt = 0; attempt < 0x10000; ++attempt) {
-                const std::string candidate = withSuffix(name, attempt);
-                if (taken.insert(lowerAscii(candidate) + '\x1f' + std::to_string(size)).second) {
-                    unique = candidate;
-                    break;
-                }
-            }
+            const std::string unique = uniqueName(name, taken, '\x1f' + std::to_string(size));
             if (unique != name) {
                 out.renamed.push_back({name, unique});
             }

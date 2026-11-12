@@ -13,5 +13,5 @@ constexpr ImVec4 colWarn(0.86f, 0.66f, 0.26f, 1.0f);
 extern float uiScale;
 // Scales a design-size pixel value by uiScale, rounded to the nearest pixel.
 float px(float value);
-void applyTheme(float scale);
+void applyTheme();
 void loadFont();

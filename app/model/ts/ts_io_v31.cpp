@@ -73,63 +73,25 @@ public:
         }
         return true;
     }
-    uint32_t u32(const char* what)
+    // msgpack's as<T>() rejects a value of the wrong type or range.
+    template <class T>
+    T scalar(const char* what, const char* kind)
     {
         msgpack::object_handle oh;
         if (!next(oh)) {
-            return 0;
+            return T{};
         }
-        if (oh.get().type != msgpack::type::POSITIVE_INTEGER) {
-            fail(format("expected unsigned int for %s", what));
-            return 0;
-        }
-        return oh.get().as<uint32_t>();
-    }
-    int32_t i32(const char* what)
-    {
-        msgpack::object_handle oh;
-        if (!next(oh)) {
-            return 0;
-        }
-        const auto t = oh.get().type;
-        if (t != msgpack::type::POSITIVE_INTEGER && t != msgpack::type::NEGATIVE_INTEGER) {
-            fail(format("expected int for %s", what));
-            return 0;
-        }
-        return oh.get().as<int32_t>();
-    }
-    float f32(const char* what)
-    {
-        msgpack::object_handle oh;
-        if (!next(oh)) {
-            return 0;
-        }
-        const msgpack::object& o = oh.get();
-        switch (o.type) {
-        case msgpack::type::POSITIVE_INTEGER:
-            return float(o.as<uint64_t>());
-        case msgpack::type::NEGATIVE_INTEGER:
-            return float(o.as<int64_t>());
-        case msgpack::type::FLOAT32:
-        case msgpack::type::FLOAT64:
-            return o.as<float>();
-        default:
-            fail(format("expected float for %s", what));
-            return 0;
+        try {
+            return oh.get().as<T>();
+        } catch (const std::exception&) {
+            fail(format("expected %s for %s", kind, what));
+            return T{};
         }
     }
-    std::string str(const char* what)
-    {
-        msgpack::object_handle oh;
-        if (!next(oh)) {
-            return {};
-        }
-        if (oh.get().type != msgpack::type::STR) {
-            fail(format("expected string for %s", what));
-            return {};
-        }
-        return oh.get().as<std::string>();
-    }
+    uint32_t u32(const char* what) { return scalar<uint32_t>(what, "unsigned int"); }
+    int32_t i32(const char* what) { return scalar<int32_t>(what, "int"); }
+    float f32(const char* what) { return scalar<float>(what, "float"); }
+    std::string str(const char* what) { return scalar<std::string>(what, "string"); }
     std::vector<float> floats(size_t n, const char* what)
     {
         std::vector<float> out(n, 0.0f);
@@ -680,46 +642,10 @@ bool readShape(const std::vector<uint8_t>& data, Shape& shape, std::string& erro
     return false;
 }
 
-bool readFileBytes(const std::string& path, std::vector<uint8_t>& out, std::string& error)
-{
-    std::ifstream f(u8path(path), std::ios::binary);
-    if (!f) {
-        error = "cannot open " + path;
-        return false;
-    }
-    f.seekg(0, std::ios::end);
-    const std::streamoff size = f.tellg();
-    f.seekg(0, std::ios::beg);
-    out.resize(size_t(std::max<std::streamoff>(size, 0)));
-    if (size > 0 && !f.read(reinterpret_cast<char*>(out.data()), size)) {
-        error = "cannot read " + path;
-        return false;
-    }
-    return true;
-}
-
-bool writeFileBytes(const std::string& path, const std::vector<uint8_t>& data, std::string& error)
-{
-    std::error_code ec;
-    const fs::path p = u8path(path);
-    if (p.has_parent_path()) {
-        fs::create_directories(p.parent_path(), ec);
-    }
-    std::ofstream f(p, std::ios::binary | std::ios::trunc);
-    if (!f || !f.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()))) {
-        error = "cannot write " + path;
-        return false;
-    }
-    return true;
-}
-
 bool readShapeFile(const std::string& path, Shape& shape, std::string& error, std::vector<std::string>* warnings)
 {
     std::vector<uint8_t> data;
-    if (!readFileBytes(path, data, error)) {
-        return false;
-    }
-    return readShape(data, shape, error, warnings);
+    return ::readFileBytes(path, data, error) && readShape(data, shape, error, warnings);
 }
 
 } // namespace ts

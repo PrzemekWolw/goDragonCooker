@@ -7,13 +7,13 @@
 #include <vector>
 
 #include <assimp/Exporter.hpp>
-#include <assimp/SceneCombiner.h>
 #include <assimp/config.h>
 #include <assimp/scene.h>
 
 #include "core/i18n.h"
 #include "core/platform.h"
 #include "core/strings.h"
+#include "model/assimp/ai_util.h"
 #include "model/axis.h"
 #include "model/draco/draco_gltf.h"
 #include "model/gltf_root.h"
@@ -23,9 +23,10 @@
 namespace model {
 namespace {
 
-// The COLLADA exporter writes <up_axis>Z_UP</up_axis> and drops the root when the root holds
-// exactly this rotation, so the file keeps the game's Z-up coordinates unchanged.
-aiMatrix4x4 colladaZUpRoot() { return zUpToYUp(); }
+using ts::cloneScene;
+using ts::isBaseStart;
+using ts::lodAnchor;
+using ScenePtr = std::unique_ptr<aiScene>;
 
 // The COLLADA exporter writes key times as seconds without applying mTicksPerSecond.
 void animationsToSeconds(aiScene& scene)
@@ -36,57 +37,59 @@ void animationsToSeconds(aiScene& scene)
         if (tps == 1.0) {
             continue;
         }
+        auto scale = [tps](auto* keys, unsigned count) {
+            for (unsigned k = 0; k < count; ++k) {
+                keys[k].mTime /= tps;
+            }
+        };
         for (unsigned c = 0; c < anim->mNumChannels; ++c) {
             aiNodeAnim* ch = anim->mChannels[c];
-            for (unsigned k = 0; k < ch->mNumPositionKeys; ++k) {
-                ch->mPositionKeys[k].mTime /= tps;
-            }
-            for (unsigned k = 0; k < ch->mNumRotationKeys; ++k) {
-                ch->mRotationKeys[k].mTime /= tps;
-            }
-            for (unsigned k = 0; k < ch->mNumScalingKeys; ++k) {
-                ch->mScalingKeys[k].mTime /= tps;
-            }
+            scale(ch->mPositionKeys, ch->mNumPositionKeys);
+            scale(ch->mRotationKeys, ch->mNumRotationKeys);
+            scale(ch->mScalingKeys, ch->mNumScalingKeys);
         }
         for (unsigned c = 0; c < anim->mNumMorphMeshChannels; ++c) {
-            aiMeshMorphAnim* ch = anim->mMorphMeshChannels[c];
-            for (unsigned k = 0; k < ch->mNumKeys; ++k) {
-                ch->mKeys[k].mTime /= tps;
-            }
+            scale(anim->mMorphMeshChannels[c]->mKeys, anim->mMorphMeshChannels[c]->mNumKeys);
         }
         anim->mDuration /= tps;
         anim->mTicksPerSecond = 1.0;
     }
 }
 
-aiScene* colladaScene(const aiScene& in)
+// Puts a new root above the scene's root. Metadata lives on the scene root; it moves where the reader looks.
+void wrapRoot(aiScene& scene, const char* name, const aiMatrix4x4& transform)
 {
-    aiScene* copy = nullptr;
-    Assimp::SceneCombiner::CopyScene(&copy, &in);
+    aiNode* root = scene.mRootNode;
+    aiNode* top = new aiNode(name);
+    top->mTransformation = transform;
+    top->mChildren = new aiNode*[1]{root};
+    top->mNumChildren = 1;
+    root->mParent = top;
+    scene.mRootNode = top;
+    std::swap(top->mMetaData, root->mMetaData);
+}
+
+// The COLLADA exporter writes <up_axis>Z_UP</up_axis> and drops the root when the root holds exactly the
+// Z-up-to-Y-up rotation, so the file keeps the game's Z-up coordinates unchanged.
+ScenePtr colladaScene(const aiScene& in)
+{
+    ScenePtr copy = cloneScene(in);
     animationsToSeconds(*copy);
     aiNode* root = copy->mRootNode;
     if (root->mTransformation.IsIdentity() && root->mNumMeshes == 0 && root->mNumChildren > 0) {
-        root->mTransformation = colladaZUpRoot();
-        return copy;
+        root->mTransformation = zUpToYUp();
+    } else {
+        wrapRoot(*copy, "Scene", zUpToYUp());
     }
-    aiNode* wrapper = new aiNode("Scene");
-    wrapper->mTransformation = colladaZUpRoot();
-    wrapper->mChildren = new aiNode*[1]{root};
-    wrapper->mNumChildren = 1;
-    root->mParent = wrapper;
-    copy->mRootNode = wrapper;
-    // Metadata lives on the scene root; keep it where the reader looks for it.
-    std::swap(wrapper->mMetaData, root->mMetaData);
     return copy;
 }
 
 // The glTF exporters give materials, meshes and nodes one id namespace and rename clashing nodes
 // ("x" -> "x_node"). The original name goes into the node's extras; gltfDropEmptyRoot writes it back
 // into the file, and Model::load restores it when reading a file that still has the renamed node.
-aiScene* gltfScene(const aiScene& in)
+ScenePtr gltfScene(const aiScene& in)
 {
-    aiScene* copy = nullptr;
-    Assimp::SceneCombiner::CopyScene(&copy, &in);
+    ScenePtr copy = cloneScene(in);
     std::set<std::string> taken;
     for (unsigned i = 0; i < copy->mNumMaterials; ++i) {
         aiString name;
@@ -110,17 +113,9 @@ aiScene* gltfScene(const aiScene& in)
         }
     };
     walk(walk, copy->mRootNode);
-    // Blender's glTF importer builds a second material, named "name.001", when one material is used on a
-    // primitive that has vertex colors and on one that does not. Give the plain one white colors.
-    std::vector<char> colored(copy->mNumMaterials, 0);
-    std::vector<char> plain(copy->mNumMaterials, 0);
-    for (unsigned i = 0; i < copy->mNumMeshes; ++i) {
-        const aiMesh* m = copy->mMeshes[i];
-        if (m->mMaterialIndex >= copy->mNumMaterials) {
-            continue;
-        }
-        (m->HasVertexColors(0) ? colored : plain)[m->mMaterialIndex] = 1;
-    }
+    // A material used with and without vertex colors would split on import; give the plain uses white colors.
+    std::vector<char> colored, plain;
+    ts::vertexColorUse(*copy, colored, plain);
     for (unsigned i = 0; i < copy->mNumMeshes; ++i) {
         aiMesh* m = copy->mMeshes[i];
         if (m->mMaterialIndex >= copy->mNumMaterials || m->HasVertexColors(0)) {
@@ -134,10 +129,7 @@ aiScene* gltfScene(const aiScene& in)
     return copy;
 }
 
-bool startsWithCi(const char* name, const char* prefix)
-{
-    return hasPrefix(toLower(name ? name : ""), prefix);
-}
+bool baseOrStart(const aiNode* node) { return hasPrefixI(node->mName.C_Str(), "base") || hasPrefixI(node->mName.C_Str(), "start"); }
 
 std::set<std::string> referencedNodeNames(const aiScene& scene)
 {
@@ -163,8 +155,7 @@ bool collapseLodWrapper(aiNode* parent, const std::set<std::string>& referenced,
     bool changed = false;
     for (unsigned i = 0; i < parent->mNumChildren; ++i) {
         aiNode* child = parent->mChildren[i];
-        const bool wrapper = !child->mNumMeshes && child->mNumChildren && lodAnchor(child) &&
-                             !startsWithCi(child->mName.C_Str(), "base") && !startsWithCi(child->mName.C_Str(), "start") &&
+        const bool wrapper = !child->mNumMeshes && child->mNumChildren && lodAnchor(child) && !baseOrStart(child) &&
                              !referenced.count(child->mName.C_Str());
         if (!wrapper) {
             kept.push_back(child);
@@ -206,8 +197,7 @@ bool lodAnchorNeeded(const aiScene& scene)
     }
     for (unsigned i = 0; i < root->mNumChildren; ++i) {
         const aiNode* child = root->mChildren[i];
-        if (!child->mNumMeshes && lodAnchor(child) && !startsWithCi(child->mName.C_Str(), "base") &&
-            !startsWithCi(child->mName.C_Str(), "start")) {
+        if (!child->mNumMeshes && lodAnchor(child) && !baseOrStart(child)) {
             return true;
         }
     }
@@ -232,10 +222,9 @@ void anchorGameLod(aiScene& scene, ConvertResult& r)
 
 // The FBX exporter merges all meshes of a node into one geometry and writes UV and color layers
 // per polygon vertex, so a mesh missing a channel the others have shifts every later value.
-aiScene* fbxScene(const aiScene& in)
+ScenePtr fbxScene(const aiScene& in)
 {
-    aiScene* copy = nullptr;
-    Assimp::SceneCombiner::CopyScene(&copy, &in);
+    ScenePtr copy = cloneScene(in);
     aiMesh** meshes = copy->mMeshes;
     auto walk = [&](auto& self, aiNode* n) -> void {
         if (n->mNumMeshes > 1) {
@@ -266,13 +255,7 @@ aiScene* fbxScene(const aiScene& in)
     };
     walk(walk, copy->mRootNode);
     // The exporter drops the root node itself, so the real root moves under a fresh one.
-    aiNode* root = copy->mRootNode;
-    aiNode* top = new aiNode("gdc_root");
-    top->mChildren = new aiNode*[1]{root};
-    top->mNumChildren = 1;
-    root->mParent = top;
-    copy->mRootNode = top;
-    std::swap(top->mMetaData, root->mMetaData);
+    wrapRoot(*copy, "gdc_root", aiMatrix4x4());
     return copy;
 }
 
@@ -420,7 +403,7 @@ bool writeTs(const ts::Shape& shape, const Format& target, const nlohmann::json&
             return false;
         }
     }
-    return ts::writeFileBytes(path, bytes, r.error);
+    return writeFileBytes(path, bytes, r.error);
 }
 
 bool writeAssimp(const aiScene& scene, const Format& target, const nlohmann::json& settings, const std::string& path, ConvertResult& r)
@@ -442,50 +425,29 @@ bool writeAssimp(const aiScene& scene, const Format& target, const nlohmann::jso
     setBool(AI_CONFIG_EXPORT_XFILE_64BIT, "x64");
     setBool(AI_CONFIG_EXPORT_POINT_CLOUDS, "pointClouds");
 
-    std::unique_ptr<aiScene> owned;
-    const aiScene* out = &scene;
-    if (target.id == "collada") {
-        owned.reset(colladaScene(scene));
-        out = owned.get();
-    } else if (target.id == "gltf2" || target.id == "gltf1") {
-        owned.reset(gltfScene(scene));
-        out = owned.get();
-    } else if (target.id == "fbx") {
-        owned.reset(fbxScene(scene));
-        out = owned.get();
-    }
-    const bool bones = std::any_of(out->mMeshes, out->mMeshes + out->mNumMeshes, [](const aiMesh* m) { return m->mNumBones > 0; });
-    if (bones && !targetCaps(target, settings).skins) {
+    ScenePtr owned = target.id == "collada"                          ? colladaScene(scene)
+                     : target.id == "gltf2" || target.id == "gltf1" ? gltfScene(scene)
+                     : target.id == "fbx"                            ? fbxScene(scene)
+                                                                     : nullptr;
+    auto edit = [&]() -> aiScene& {
         if (!owned) {
-            aiScene* copy = nullptr;
-            Assimp::SceneCombiner::CopyScene(&copy, &scene);
-            owned.reset(copy);
+            owned = cloneScene(scene);
         }
-        bakeSkins(*owned);
-        out = owned.get();
+        return *owned;
+    };
+    auto current = [&]() -> const aiScene& { return owned ? *owned : scene; };
+    if (std::any_of(scene.mMeshes, scene.mMeshes + scene.mNumMeshes, [](const aiMesh* m) { return m->mNumBones > 0; }) &&
+        !targetCaps(target, settings).skins) {
+        bakeSkins(edit());
         r.warnings.push_back(tr("gdc.model.note.bakedSkin"));
     }
-    const WriterFrame frame = writerFrame(target.id);
-    if (frame.up == UpAxis::Y) {
-        if (!owned) {
-            aiScene* copy = nullptr;
-            Assimp::SceneCombiner::CopyScene(&copy, &scene);
-            owned.reset(copy);
-        }
-        rotateScene(*owned, zUpToYUp());
-        out = owned.get();
+    if (writerUp(target.id) == UpAxis::Y) {
+        rotateScene(edit(), zUpToYUp());
     }
-    if (lodAnchorNeeded(*out)) {
-        if (!owned) {
-            aiScene* copy = nullptr;
-            Assimp::SceneCombiner::CopyScene(&copy, out);
-            owned.reset(copy);
-            out = owned.get();
-        }
-        anchorGameLod(*owned, r);
-        out = owned.get();
+    if (lodAnchorNeeded(current())) {
+        anchorGameLod(edit(), r);
     }
-    if (exporter.Export(out, target.exporterId(settings), path, 0, &props) != aiReturn_SUCCESS) {
+    if (exporter.Export(&current(), target.exporterId(settings), path, 0, &props) != aiReturn_SUCCESS) {
         r.error = exporter.GetErrorString();
         if (r.error.empty()) {
             r.error = "Assimp export failed";
@@ -534,8 +496,8 @@ ts::TsToAiOptions tsToAiOptions(const Format& target, const nlohmann::json& sett
     return o;
 }
 
-static ConvertResult convertModelImpl(Model& source, const std::string& outputPath, const ConvertOptions& options)
-{
+ConvertResult convertModel(Model& source, const std::string& outputPath, const ConvertOptions& options)
+try {
     ConvertResult r;
     if (!options.target || !options.target->canWrite) {
         r.error = "no target format";
@@ -568,7 +530,7 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
     r.ok = true;
     r.log.push_back(format("wrote %s", sizeText(fileSize(outputPath)).c_str()));
     r.log.push_back(format("up axis: source %s, written %s-up", source.upAxisNote().c_str(),
-                           target.isTs ? "Z" : upAxisName(writerFrame(target.id).up)));
+                           target.isTs ? "Z" : upAxisName(writerUp(target.id))));
 
     if (!options.validate) {
         return r;
@@ -588,14 +550,17 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
     const aiScene* writtenScene = nullptr;
     Model reread;
     const ts::TsToAiOptions exportOpts = tsToAiOptions(target, settings);
+    auto rereadFailed = [&r](const std::string& why) {
+        r.report.verdict = Verdict::Fail;
+        r.report.lines.push_back(std::string("FAIL ") + format(tr("gdc.model.warn.reread"), why.c_str()));
+        r.validated = true;
+        return r;
+    };
     if (target.isTs) {
         ts::Shape written;
         std::string err;
         if (!ts::readShapeFile(outputPath, written, err)) {
-            r.report.verdict = Verdict::Fail;
-            r.report.lines.push_back(std::string("FAIL ") + format(tr("gdc.model.warn.reread"), err.c_str()));
-            r.validated = true;
-            return r;
+            return rereadFailed(err);
         }
         const ts::AiToTsOptions importOpts = aiToTsOptions(target, settings);
         hints.singleDetail = importOpts.lod == ts::LodMode::SingleDetail;
@@ -613,17 +578,11 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
         std::string err;
         std::vector<std::string> ignored;
         if (!reread.load(outputPath, err, ignored)) {
-            r.report.verdict = Verdict::Fail;
-            r.report.lines.push_back(std::string("FAIL ") + format(tr("gdc.model.warn.reread"), err.c_str()));
-            r.validated = true;
-            return r;
+            return rereadFailed(err);
         }
         writtenScene = reread.scene(exportOpts, ignored);
         if (const std::string bad = badFaceIndex(*writtenScene); !bad.empty()) {
-            r.report.verdict = Verdict::Fail;
-            r.report.lines.push_back(std::string("FAIL ") + format(tr("gdc.model.warn.reread"), bad.c_str()));
-            r.validated = true;
-            return r;
+            return rereadFailed(bad);
         }
         // FBX, COLLADA and 3DS write the scene's own root container as a node.
         if (scene && scene->mRootNode) {
@@ -653,7 +612,7 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
     const Capabilities caps = targetCaps(target, settings);
     r.report = compareSummaries(before, after, caps, toleranceFor(target, settings), hints);
     if (!target.isTs) {
-        checkUpAxis(r.report, writerFrame(target.id).up, readRawFrame(outputPath), before);
+        checkUpAxis(r.report, writerUp(target.id), readRawFrame(outputPath), before);
         if (writtenScene && scene) {
             checkGameLod(r.report, *writtenScene, *scene, caps.hierarchy);
             if (caps.meshNames) {
@@ -664,17 +623,10 @@ static ConvertResult convertModelImpl(Model& source, const std::string& outputPa
     }
     r.validated = true;
     return r;
-}
-
-ConvertResult convertModel(Model& source, const std::string& outputPath, const ConvertOptions& options)
-{
-    try {
-        return convertModelImpl(source, outputPath, options);
-    } catch (const std::exception& e) {
-        ConvertResult r;
-        r.error = std::string("internal error: ") + e.what();
-        return r;
-    }
+} catch (const std::exception& e) {
+    ConvertResult r;
+    r.error = std::string("internal error: ") + e.what();
+    return r;
 }
 
 std::vector<std::string> planOutputPaths(const std::vector<OutputRequest>& requests, const std::string& srcRoot, const std::string& outRoot)

@@ -80,14 +80,7 @@ std::string texconvInit()
     if (texconvFn) {
         return "";
     }
-#if defined(_WIN32)
-    const char* name = "texconv.dll";
-#elif defined(__APPLE__)
-    const char* name = "libtexconv.dylib";
-#else
-    const char* name = "libtexconv.so";
-#endif
-    const fs::path path = findAsset(name);
+    const fs::path path = findLibrary("texconv");
     if (path.empty()) {
         return "texconv library not found (looked in bin/ next to executable and cwd)";
     }

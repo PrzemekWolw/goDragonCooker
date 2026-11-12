@@ -106,34 +106,28 @@ UpAxis importedUp(const std::string& ext)
     return zUp.count(toLower(ext)) ? UpAxis::Z : UpAxis::Y;
 }
 
-WriterFrame writerFrame(const std::string& formatId)
+UpAxis writerUp(const std::string& formatId)
 {
     // Z-up formats keep game coordinates. COLLADA writes its own <up_axis>Z_UP</up_axis>.
     static const std::set<std::string> zUp = {"collada", "stl", "ply", "3ds", "3mf", "stp"};
-    WriterFrame f;
-    f.up = zUp.count(formatId) ? UpAxis::Z : UpAxis::Y;
-    return f;
+    return zUp.count(formatId) ? UpAxis::Z : UpAxis::Y;
+}
+
+UpAxis colladaUpAxis(const std::string& text, UpAxis missing)
+{
+    const size_t p = text.find("<up_axis>");
+    if (p == std::string::npos) {
+        return missing;
+    }
+    const std::string v = text.substr(p + 9, 16);
+    return v.find("Y_UP") != std::string::npos ? UpAxis::Y : v.find("X_UP") != std::string::npos ? UpAxis::X : UpAxis::Z;
 }
 
 namespace {
 
-std::optional<UpAxis> colladaDeclared(const std::string& path)
-{
-    std::ifstream f(fs::u8path(path), std::ios::binary);
-    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    const size_t p = text.find("<up_axis>");
-    if (p == std::string::npos) {
-        return UpAxis::Y; // COLLADA's default when the element is missing
-    }
-    const std::string v = text.substr(p + 9, 8);
-    return v.find('X') == 0 ? UpAxis::X : v.find('Y') == 0 ? UpAxis::Y : UpAxis::Z;
-}
-
 // COLLADA's <unit meter="..."/>. The game's assimp multiplies the root by it; 1 when the element is missing.
-std::optional<double> colladaMeter(const std::string& path)
+std::optional<double> colladaMeter(const std::string& text)
 {
-    std::ifstream f(fs::u8path(path), std::ios::binary);
-    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     const size_t p = text.find("meter=\"");
     if (p == std::string::npos) {
         return 1.0;
@@ -158,8 +152,10 @@ RawFrame readRawFrame(const std::string& path)
         return r;
     }
     if (ext == ".dae") {
-        r.declared = colladaDeclared(path);
-        r.gameScale = colladaMeter(path);
+        std::ifstream f(fs::u8path(path), std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        r.declared = colladaUpAxis(text, UpAxis::Y); // COLLADA's default when the element is missing
+        r.gameScale = colladaMeter(text);
     } else if (ext == ".fbx" && scene->mMetaData) {
         int32_t axis = 0, sign = 1;
         if (scene->mMetaData->Get("UpAxis", axis)) {

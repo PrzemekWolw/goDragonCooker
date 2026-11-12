@@ -42,8 +42,15 @@ void TaskState::begin(const std::string& value)
         running = true;
         status = value;
         stop = false;
+        logLines.clear();
     }
     requestRedraw();
+}
+
+void startTask(TaskState& task, const std::string& status, std::function<void()> work)
+{
+    task.begin(status);
+    std::thread(std::move(work)).detach();
 }
 
 void TaskState::finish(const std::string& value)

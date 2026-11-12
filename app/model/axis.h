@@ -27,11 +27,11 @@ UpAxis importedUp(const std::string& ext);
 // is rotated and every node transform conjugated, so a node keeps its orientation relative to its geometry.
 void rotateScene(aiScene& scene, const aiMatrix4x4& rot);
 
-// The frame of the coordinates a writer stores.
-struct WriterFrame {
-    UpAxis up = UpAxis::Y;
-};
-WriterFrame writerFrame(const std::string& formatId);
+// The up axis of the coordinates a writer stores.
+UpAxis writerUp(const std::string& formatId);
+
+// The <up_axis> of a COLLADA document's text, or `missing` when it has none.
+UpAxis colladaUpAxis(const std::string& text, UpAxis missing);
 
 // What an exported file says and holds, read without any up-axis conversion.
 struct RawFrame {

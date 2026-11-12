@@ -67,6 +67,23 @@ SettingDef choiceSetting(const char* key, const char* label, std::vector<std::st
     return s;
 }
 
+using PickString = std::function<std::string(const nlohmann::json&)>;
+
+PickString always(std::string s)
+{
+    return [s = std::move(s)](const nlohmann::json&) { return s; };
+}
+
+// `first` for the "container" choice's first option, `second` for its other one.
+PickString byContainer(const char* first, const char* second)
+{
+    return [first, second](const nlohmann::json& v) { return std::string(v.value("container", 0) == 1 ? second : first); };
+}
+
+SettingDef gltfContainer() { return choiceSetting("container", "gdc.format.container.label", {"gdc.format.container.choice.glb", "gdc.format.container.choice.gltf"}, 0); }
+
+SettingDef encodingSetting() { return choiceSetting("container", "gdc.format.encoding.label", {"gdc.format.encoding.choice.binary", "gdc.format.encoding.choice.ascii"}, 0); }
+
 // Settings for building a TSShape from an Assimp scene (used by both TS targets).
 void addTsImportSettings(std::vector<SettingDef>& s)
 {
@@ -118,8 +135,8 @@ struct Registry {
         level.visible = whenNe("compression", 2);
         cdae.settings.push_back(level);
         addTsImportSettings(cdae.settings);
-        cdae.exporterId = [](const nlohmann::json&) { return std::string(); };
-        cdae.outputExt = [](const nlohmann::json&) { return std::string(".cdae"); };
+        cdae.exporterId = always("");
+        cdae.outputExt = always(".cdae");
         list.push_back(cdae);
 
         Format dts;
@@ -137,8 +154,8 @@ struct Registry {
                                            "gdc.format.dtsVersion.tooltip");
         dts.settings.push_back(version);
         addTsImportSettings(dts.settings);
-        dts.exporterId = [](const nlohmann::json&) { return std::string(); };
-        dts.outputExt = [](const nlohmann::json&) { return std::string(".dts"); };
+        dts.exporterId = always("");
+        dts.outputExt = always(".dts");
         list.push_back(dts);
     }
 
@@ -168,8 +185,8 @@ struct Registry {
             f.exts = {".dae"};
             f.caps.uv2 = f.caps.colors = f.caps.skins = f.caps.animations = true;
             addSharedAssimpSettings(f.settings, true);
-            f.exporterId = [](const nlohmann::json&) { return std::string("collada"); };
-            f.outputExt = [](const nlohmann::json&) { return std::string(".dae"); };
+            f.exporterId = always("collada");
+            f.outputExt = always(".dae");
             fold(f, {"collada"});
         }
         {
@@ -178,7 +195,7 @@ struct Registry {
             f.label = "glTF 2.0 (.glb / .gltf)";
             f.exts = {".glb", ".gltf"};
             f.caps.uv2 = f.caps.colors = f.caps.tangents = f.caps.skins = f.caps.animations = f.caps.morphs = true;
-            f.settings.push_back(choiceSetting("container", "gdc.format.container.label", {"gdc.format.container.choice.glb", "gdc.format.container.choice.gltf"}, 0));
+            f.settings.push_back(gltfContainer());
             f.settings.push_back(boolSetting("unlimitedBones", "gdc.format.unlimitedBones.label", true,
                                              "gdc.format.unlimitedBones.tooltip"));
             f.settings.push_back(boolSetting("specGloss", "gdc.format.specGloss.label", false,
@@ -210,8 +227,8 @@ struct Registry {
                 f.settings.push_back(q);
             }
             addSharedAssimpSettings(f.settings, true);
-            f.exporterId = [](const nlohmann::json& v) { return std::string(v.value("container", 0) == 1 ? "gltf2" : "glb2"); };
-            f.outputExt = [](const nlohmann::json& v) { return std::string(v.value("container", 0) == 1 ? ".gltf" : ".glb"); };
+            f.exporterId = byContainer("glb2", "gltf2");
+            f.outputExt = byContainer(".glb", ".gltf");
             fold(f, {"gltf2", "glb2"});
         }
         {
@@ -219,10 +236,10 @@ struct Registry {
             f.id = "gltf1";
             f.label = "glTF 1.0 (.glb / .gltf)";
             f.exts = {".glb", ".gltf"};
-            f.settings.push_back(choiceSetting("container", "gdc.format.container.label", {"gdc.format.container.choice.glb", "gdc.format.container.choice.gltf"}, 0));
+            f.settings.push_back(gltfContainer());
             addSharedAssimpSettings(f.settings, false);
-            f.exporterId = [](const nlohmann::json& v) { return std::string(v.value("container", 0) == 1 ? "gltf" : "glb"); };
-            f.outputExt = [](const nlohmann::json& v) { return std::string(v.value("container", 0) == 1 ? ".gltf" : ".glb"); };
+            f.exporterId = byContainer("glb", "gltf");
+            f.outputExt = byContainer(".glb", ".gltf");
             fold(f, {"gltf", "glb"});
         }
         {
@@ -231,12 +248,12 @@ struct Registry {
             f.label = "Autodesk FBX (.fbx)";
             f.exts = {".fbx"};
             f.caps.uv2 = f.caps.colors = f.caps.skins = f.caps.animations = true;
-            f.settings.push_back(choiceSetting("container", "gdc.format.encoding.label", {"gdc.format.encoding.choice.binary", "gdc.format.encoding.choice.ascii"}, 0));
+            f.settings.push_back(encodingSetting());
             f.settings.push_back(boolSetting("transparencyFactor", "gdc.format.transparencyFactor.label", false,
                                              "gdc.format.transparencyFactor.tooltip"));
             addSharedAssimpSettings(f.settings, false);
-            f.exporterId = [](const nlohmann::json& v) { return std::string(v.value("container", 0) == 1 ? "fbxa" : "fbx"); };
-            f.outputExt = [](const nlohmann::json&) { return std::string(".fbx"); };
+            f.exporterId = byContainer("fbx", "fbxa");
+            f.outputExt = always(".fbx");
             fold(f, {"fbx", "fbxa"});
         }
         {
@@ -251,7 +268,7 @@ struct Registry {
             f.settings.push_back(boolSetting("mtl", "gdc.format.mtl.label", true));
             addSharedAssimpSettings(f.settings, true);
             f.exporterId = [](const nlohmann::json& v) { return std::string(v.value("mtl", 1) ? "obj" : "objnomtl"); };
-            f.outputExt = [](const nlohmann::json&) { return std::string(".obj"); };
+            f.outputExt = always(".obj");
             fold(f, {"obj", "objnomtl"});
         }
         {
@@ -260,10 +277,10 @@ struct Registry {
             f.label = "Stereolithography (.stl)";
             f.exts = {".stl"};
             f.caps = {false, false, false, false, false, false, false, false, false, false, false, false, false};
-            f.settings.push_back(choiceSetting("container", "gdc.format.encoding.label", {"gdc.format.encoding.choice.binary", "gdc.format.encoding.choice.ascii"}, 0));
+            f.settings.push_back(encodingSetting());
             addSharedAssimpSettings(f.settings, true);
-            f.exporterId = [](const nlohmann::json& v) { return std::string(v.value("container", 0) == 1 ? "stl" : "stlb"); };
-            f.outputExt = [](const nlohmann::json&) { return std::string(".stl"); };
+            f.exporterId = byContainer("stlb", "stl");
+            f.outputExt = always(".stl");
             fold(f, {"stl", "stlb"});
         }
         {
@@ -273,10 +290,10 @@ struct Registry {
             f.exts = {".ply"};
             f.caps.hierarchy = f.caps.materials = f.caps.meshNames = false;
             f.caps.colors = true;
-            f.settings.push_back(choiceSetting("container", "gdc.format.encoding.label", {"gdc.format.encoding.choice.binary", "gdc.format.encoding.choice.ascii"}, 0));
+            f.settings.push_back(encodingSetting());
             addSharedAssimpSettings(f.settings, true);
-            f.exporterId = [](const nlohmann::json& v) { return std::string(v.value("container", 0) == 1 ? "ply" : "plyb"); };
-            f.outputExt = [](const nlohmann::json&) { return std::string(".ply"); };
+            f.exporterId = byContainer("plyb", "ply");
+            f.outputExt = always(".ply");
             fold(f, {"ply", "plyb"});
         }
         {
@@ -287,8 +304,8 @@ struct Registry {
             f.caps.colors = true;
             f.settings.push_back(boolSetting("x64", "gdc.format.x64.label", false));
             addSharedAssimpSettings(f.settings, true);
-            f.exporterId = [](const nlohmann::json&) { return std::string("x"); };
-            f.outputExt = [](const nlohmann::json&) { return std::string(".x"); };
+            f.exporterId = always("x");
+            f.outputExt = always(".x");
             fold(f, {"x"});
         }
 
@@ -324,9 +341,8 @@ struct Registry {
                 f.caps.normals = id == "pbrt";
             }
             addSharedAssimpSettings(f.settings, true);
-            const std::string ext = "." + std::string(d->fileExtension);
-            f.exporterId = [id](const nlohmann::json&) { return id; };
-            f.outputExt = [ext](const nlohmann::json&) { return ext; };
+            f.exporterId = always(id);
+            f.outputExt = always("." + std::string(d->fileExtension));
             list.push_back(std::move(f));
         }
     }

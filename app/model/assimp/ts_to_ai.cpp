@@ -10,15 +10,18 @@
 #include "core/i18n.h"
 #include "core/strings.h"
 #include "model/assimp/ai_bridge.h"
-#include "model/assimp/ai_meta.h"
+#include "model/assimp/ai_util.h"
 
 namespace ts {
 namespace {
 
-aiMatrix4x4 toAi(const Mat4& m)
+// Copies src into a new[] array (null when empty) and returns the count.
+template <class T>
+unsigned fillArray(T*& dst, const std::vector<T>& src)
 {
-    return aiMatrix4x4(m.m[0], m.m[1], m.m[2], m.m[3], m.m[4], m.m[5], m.m[6], m.m[7], m.m[8], m.m[9], m.m[10], m.m[11], m.m[12],
-                       m.m[13], m.m[14], m.m[15]);
+    dst = src.empty() ? nullptr : new T[src.size()];
+    std::copy(src.begin(), src.end(), dst);
+    return unsigned(src.size());
 }
 
 aiNode* newNode(const std::string& name, aiNode* parent)
@@ -30,15 +33,18 @@ aiNode* newNode(const std::string& name, aiNode* parent)
 
 void attachChildren(aiNode* parent, const std::vector<aiNode*>& children)
 {
-    if (children.empty()) {
-        return;
+    parent->mNumChildren = fillArray(parent->mChildren, children);
+    for (aiNode* child : children) {
+        child->mParent = parent;
     }
-    parent->mNumChildren = unsigned(children.size());
-    parent->mChildren = new aiNode*[children.size()];
-    for (size_t i = 0; i < children.size(); ++i) {
-        parent->mChildren[i] = children[i];
-        children[i]->mParent = parent;
-    }
+}
+
+aiMaterial* namedMaterial(const std::string& name)
+{
+    aiMaterial* m = new aiMaterial;
+    aiString value(name);
+    m->AddProperty(&value, AI_MATKEY_NAME);
+    return m;
 }
 
 struct Exporter {
@@ -67,11 +73,8 @@ struct Exporter {
             return p.material();
         }
         if (noMaterialIndex < 0) {
-            aiMaterial* m = new aiMaterial;
-            aiString name("NoMaterial");
-            m->AddProperty(&name, AI_MATKEY_NAME);
             noMaterialIndex = int(materials.size());
-            materials.push_back(m);
+            materials.push_back(namedMaterial("NoMaterial"));
         }
         return unsigned(noMaterialIndex);
     }
@@ -79,9 +82,7 @@ struct Exporter {
     void buildMaterials()
     {
         for (const Material& mat : shape.materials) {
-            aiMaterial* m = new aiMaterial;
-            aiString name(mat.name);
-            m->AddProperty(&name, AI_MATKEY_NAME);
+            aiMaterial* m = namedMaterial(mat.name);
             const int twoSided = 0;
             m->AddProperty(&twoSided, 1, AI_MATKEY_TWOSIDED);
             if (mat.flags & Translucent) {
@@ -104,10 +105,10 @@ struct Exporter {
             return false;
         }
         for (const Node& n : shape.nodes) {
-            if (n.parentIndex < 0 && hasPrefix(lowerAscii(shape.name(n.nameIndex)), "base")) {
+            if (n.parentIndex < 0 && hasPrefix(toLower(shape.name(n.nameIndex)), "base")) {
                 for (const Node& c : shape.nodes) {
                     if (&c != &n && c.parentIndex == int(&n - shape.nodes.data()) &&
-                        hasPrefix(lowerAscii(shape.name(c.nameIndex)), "start")) {
+                        hasPrefix(toLower(shape.name(c.nameIndex)), "start")) {
                         return false;
                     }
                 }
@@ -117,7 +118,7 @@ struct Exporter {
     }
 
     // Converts one TS mesh into aiMeshes (one per material group).
-    std::vector<unsigned> convertMesh(const Mesh& src, const std::string& name, int objectIndex)
+    std::vector<unsigned> convertMesh(const Mesh& src, const std::string& name)
     {
         std::vector<unsigned> out;
         Mesh m = src;
@@ -273,25 +274,17 @@ struct Exporter {
                     aiBone* bone = new aiBone;
                     bone->mName = aiString(node >= 0 && node < int(shape.nodes.size()) ? shape.name(shape.nodes[node].nameIndex) : "bone");
                     bone->mOffsetMatrix = toAi(toMat4(m.initialTransforms[slotOfNode[node]]));
-                    bone->mNumWeights = unsigned(weights.size());
-                    bone->mWeights = new aiVertexWeight[weights.size()];
-                    std::copy(weights.begin(), weights.end(), bone->mWeights);
+                    bone->mNumWeights = fillArray(bone->mWeights, weights);
                     am->mBones[b++] = bone;
                 }
             }
             out.push_back(unsigned(meshes.size()));
             meshes.push_back(am);
         }
-        (void)objectIndex;
         return out;
     }
 
-    static void setMeshes(aiNode* node, const std::vector<unsigned>& ids)
-    {
-        node->mNumMeshes = unsigned(ids.size());
-        node->mMeshes = new unsigned[ids.size()];
-        std::copy(ids.begin(), ids.end(), node->mMeshes);
-    }
+    static void setMeshes(aiNode* node, const std::vector<unsigned>& ids) { node->mNumMeshes = fillArray(node->mMeshes, ids); }
 
     void addMeshNode(int parentTs, const std::string& name, const std::string& objName, int size, const std::vector<unsigned>& ids,
                      int objectIndex)
@@ -302,7 +295,7 @@ struct Exporter {
         meshNodes[name] = {objName, size};
         objectMeshNodes[objectIndex].push_back({name, ids.front()});
         // The usual layout: the object's node is itself named "<object><size>", so it carries the mesh.
-        if (parentTs >= 0 && !tsNodes[parentTs]->mNumMeshes && lowerAscii(tsNodes[parentTs]->mName.C_Str()) == lowerAscii(name)) {
+        if (parentTs >= 0 && !tsNodes[parentTs]->mNumMeshes && toLower(tsNodes[parentTs]->mName.C_Str()) == toLower(name)) {
             setMeshes(tsNodes[parentTs], ids);
             return;
         }
@@ -319,40 +312,23 @@ struct Exporter {
     void buildObjects()
     {
         // Which details to export: all mesh details (or only the highest visible one).
-        std::vector<int> detailOfSlot; // objectDetailNum -> detail index (subshape 0 layout)
-        int highestVisible = -1;
-        for (int d = 0; d < int(shape.details.size()); ++d) {
-            const Detail& det = shape.details[d];
-            if (det.subShapeNum < 0) {
-                continue;
-            }
-            if (det.size >= 0 && (highestVisible < 0 || det.size > shape.details[highestVisible].size)) {
-                highestVisible = d;
-            }
-        }
+        const int highestVisible = shape.highestVisibleDetail();
         for (int o = 0; o < int(shape.objects.size()); ++o) {
             const Object& obj = shape.objects[o];
-            const int ss = shape.subShapeOfObject(o);
             const std::string objName = shape.name(obj.nameIndex);
             for (int d = 0; d < int(shape.details.size()); ++d) {
                 const Detail& det = shape.details[d];
-                if (det.subShapeNum != ss || det.objectDetailNum < 0 || det.objectDetailNum >= obj.numMeshes) {
+                if ((!opt.lodNames && d != highestVisible) || (det.size < 0 && !opt.includeCollision)) {
                     continue;
                 }
-                if (!opt.lodNames && d != highestVisible) {
+                const Mesh* found = shape.detailMesh(o, d);
+                if (!found) {
                     continue;
                 }
-                if (det.size < 0 && !opt.includeCollision) {
-                    continue;
-                }
-                const int mi = obj.startMeshIndex + det.objectDetailNum;
-                if (mi < 0 || mi >= int(shape.meshes.size()) || shape.meshes[mi].isNull()) {
-                    continue;
-                }
-                const Mesh& mesh = shape.meshes[mi];
+                const Mesh& mesh = *found;
                 const int size = int(det.size);
                 const std::string nodeName = opt.lodNames ? objName + std::to_string(size) : objName;
-                const std::vector<unsigned> ids = convertMesh(mesh, nodeName, o);
+                const std::vector<unsigned> ids = convertMesh(mesh, nodeName);
                 const int parentTs = mesh.isSkin() || obj.nodeIndex >= int(tsNodes.size()) ? -1 : obj.nodeIndex;
                 addMeshNode(parentTs, nodeName, objName, size, ids, o);
             }
@@ -459,16 +435,8 @@ struct Exporter {
                 }
             }
 
-            anim->mNumChannels = unsigned(channels.size());
-            if (!channels.empty()) {
-                anim->mChannels = new aiNodeAnim*[channels.size()];
-                std::copy(channels.begin(), channels.end(), anim->mChannels);
-            }
-            anim->mNumMorphMeshChannels = unsigned(morphs.size());
-            if (!morphs.empty()) {
-                anim->mMorphMeshChannels = new aiMeshMorphAnim*[morphs.size()];
-                std::copy(morphs.begin(), morphs.end(), anim->mMorphMeshChannels);
-            }
+            anim->mNumChannels = fillArray(anim->mChannels, channels);
+            anim->mNumMorphMeshChannels = fillArray(anim->mMorphMeshChannels, morphs);
             if (channels.empty() && morphs.empty()) {
                 delete anim;
                 continue;
@@ -574,26 +542,12 @@ struct Exporter {
 
         buildAnimations();
 
-        scene->mNumMaterials = unsigned(materials.size());
         if (materials.empty()) {
-            aiMaterial* m = new aiMaterial;
-            aiString name("NoMaterial");
-            m->AddProperty(&name, AI_MATKEY_NAME);
-            materials.push_back(m);
-            scene->mNumMaterials = 1;
+            materials.push_back(namedMaterial("NoMaterial"));
         }
-        scene->mMaterials = new aiMaterial*[materials.size()];
-        std::copy(materials.begin(), materials.end(), scene->mMaterials);
-        scene->mNumMeshes = unsigned(meshes.size());
-        if (!meshes.empty()) {
-            scene->mMeshes = new aiMesh*[meshes.size()];
-            std::copy(meshes.begin(), meshes.end(), scene->mMeshes);
-        }
-        scene->mNumAnimations = unsigned(animations.size());
-        if (!animations.empty()) {
-            scene->mAnimations = new aiAnimation*[animations.size()];
-            std::copy(animations.begin(), animations.end(), scene->mAnimations);
-        }
+        scene->mNumMaterials = fillArray(scene->mMaterials, materials);
+        scene->mNumMeshes = fillArray(scene->mMeshes, meshes);
+        scene->mNumAnimations = fillArray(scene->mAnimations, animations);
         const nlohmann::json meta = metadata();
         putJsonMeta(root->mMetaData, kTsMetadataKey, meta);
         putJsonMeta(scene->mMetaData, kTsMetadataKey, meta);

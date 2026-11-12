@@ -103,7 +103,6 @@ std::string correctNormalSpace(CookJob& job)
 void runCooker(std::string directory, bool autoDetectFmt, bool fixNormalSpace, CookValidation validation)
 {
     TaskState& tab = cookTab.task;
-    tab.begin(tr("gdc.cook.seekingFiles"));
     std::string backend;
     int vulkanDevice;
     {
@@ -438,14 +437,11 @@ void cookTabInit()
 {
     registerSettings(
         [](const SettingsJson& j) {
-            if (!j.contains("cook") || !j["cook"].is_object()) {
-                return;
-            }
-            const SettingsJson& s = j["cook"];
+            const SettingsJson s = j.value("cook", SettingsJson::object());
             CookValidation& v = cookTab.validation;
-            cookTab.directory = s.value("directory", "");
-            cookTab.autoDetectFmt = s.value("assumeGrayscale", false);
-            cookTab.fixNormalSpace = s.value("fixNormalColorSpace", true);
+            cookTab.directory = s.value("directory", cookTab.directory);
+            cookTab.autoDetectFmt = s.value("assumeGrayscale", cookTab.autoDetectFmt);
+            cookTab.fixNormalSpace = s.value("fixNormalColorSpace", cookTab.fixNormalSpace);
             v.validate = s.value("validate", v.validate);
             v.retry = s.value("retry", v.retry);
             v.thresholds.bc7 = s.value("targetBC7", v.thresholds.bc7);
@@ -502,12 +498,7 @@ void cookTabUI()
     }
     CookTab& c = cookTab;
     ImGui::TextUnformatted(tr("gdc.common.texturesDirectory"));
-    bool dirty = ImGui::InputText("##cook_directory", &c.directory);
-    ImGui::SameLine();
-    if (iconButton(ICON_FOLDER_OPEN, "cook_browse")) {
-        openDirPicker(&c.directory);
-    }
-    tooltip("gdc.common.browse");
+    bool dirty = directoryField("##cook_directory", c.directory);
 
     ImGui::Separator();
     dirty |= ImGui::Checkbox(trId("gdc.cook.assumeDataTexturesAreGrayscale", "cook_auto_fmt").c_str(), &c.autoDetectFmt);
@@ -520,25 +511,13 @@ void cookTabUI()
     validationControlsUI(c.validation);
     ImGui::Separator();
 
-    std::string status;
-    bool running;
     std::vector<std::string> logLines;
-    {
-        std::lock_guard lock(c.task.mu);
-        status = c.task.status;
-        running = c.task.running;
-        logLines = c.task.logLines;
+    if (taskButton(c.task, iconLabel(ICON_PLAY_ARROW, "gdc.cook.runTextureCooker", "cook_run"),
+                   iconLabel(ICON_STOP, "gdc.cook.stopCooker", "cook_run"), logLines) &&
+        !c.directory.empty()) {
+        startTask(c.task, tr("gdc.cook.seekingFiles"),
+                  [dir = c.directory, fmt = c.autoDetectFmt, fix = c.fixNormalSpace, v = c.validation] { runCooker(dir, fmt, fix, v); });
     }
-    if (running) {
-        if (ImGui::Button(iconLabel(ICON_STOP, "gdc.cook.stopCooker", "cook_run").c_str())) {
-            c.task.stop = true;
-        }
-    } else if (ImGui::Button(iconLabel(ICON_PLAY_ARROW, "gdc.cook.runTextureCooker", "cook_run").c_str()) &&
-               !c.directory.empty()) {
-        c.task.log("");
-        std::thread(runCooker, c.directory, c.autoDetectFmt, c.fixNormalSpace, c.validation).detach();
-    }
-    ImGui::Text(tr("gdc.common.status"), status.empty() ? tr("gdc.common.waiting") : status.c_str());
 
     ImGui::Separator();
     logView("##cook_log", logLines, 280, cookLogLevel);

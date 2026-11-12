@@ -38,16 +38,17 @@ void loadSettings()
     if (!file) {
         return;
     }
-    try {
-        document = SettingsJson::parse(file);
-        if (!document.is_object()) {
-            document = SettingsJson::object();
-        }
-        for (const Section& section : sections) {
-            section.load(document);
-        }
-    } catch (const std::exception&) {
+    document = SettingsJson::parse(file, nullptr, false);
+    if (!document.is_object()) {
         document = SettingsJson::object();
+        return;
+    }
+    // A value of the wrong type throws; that section keeps its defaults.
+    for (const Section& section : sections) {
+        try {
+            section.load(document);
+        } catch (const std::exception&) {
+        }
     }
 }
 

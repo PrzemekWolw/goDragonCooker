@@ -71,7 +71,8 @@ struct ObjectNaming {
 ObjectNaming objectNaming(const aiScene& scene, const AiToTsOptions& options);
 
 // TS node and object names are unique (case-insensitive); a repeat gets B, C, ... appended.
-std::string uniqueName(const std::string& base, std::unordered_set<std::string>& taken);
+// keySuffix scopes uniqueness, e.g. per detail size.
+std::string uniqueName(const std::string& base, std::unordered_set<std::string>& taken, const std::string& keySuffix = "");
 
 // A node listed in `collapse` that the TS export generated: a mesh-only leaf holder or the base01/start01 wrapper.
 // A shape node may share a holder's name, so the name alone does not decide.

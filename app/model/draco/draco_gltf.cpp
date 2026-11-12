@@ -19,6 +19,7 @@
 
 #include "core/platform.h"
 #include "core/strings.h"
+#include "model/gltf_root.h"
 #include "model/ts/ts_io.h"
 
 namespace model {
@@ -26,23 +27,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr uint32_t kGlbMagic = 0x46546C67; // "glTF"
-constexpr uint32_t kChunkJson = 0x4E4F534A;
-constexpr uint32_t kChunkBin = 0x004E4942;
 constexpr const char* kExt = "KHR_draco_mesh_compression";
-
-uint32_t readU32(const uint8_t* p)
-{
-    uint32_t v;
-    std::memcpy(&v, p, 4);
-    return v;
-}
-
-void appendU32(std::vector<uint8_t>& out, uint32_t v)
-{
-    const uint8_t* p = reinterpret_cast<const uint8_t*>(&v);
-    out.insert(out.end(), p, p + 4);
-}
 
 int componentSize(int type)
 {
@@ -97,49 +82,21 @@ int numComponents(const std::string& type)
 }
 
 struct Document {
-    json gltf;
+    GltfFile file;
+    json& gltf = file.json;
     std::vector<std::vector<uint8_t>> buffers;
-    bool glb = false;
     fs::path dir;
 };
 
 bool load(const std::string& path, Document& doc, std::string& error)
 {
-    std::vector<uint8_t> bytes;
-    if (!ts::readFileBytes(path, bytes, error)) {
+    if (!readGltfFile(path, doc.file, error)) {
         return false;
     }
     doc.dir = u8path(path).parent_path();
-    std::string jsonText;
-    std::vector<uint8_t> bin;
-    if (bytes.size() >= 12 && readU32(bytes.data()) == kGlbMagic) {
-        doc.glb = true;
-        size_t p = 12;
-        while (p + 8 <= bytes.size()) {
-            const uint32_t len = readU32(&bytes[p]);
-            const uint32_t type = readU32(&bytes[p + 4]);
-            if (p + 8 + len > bytes.size()) {
-                error = "truncated GLB chunk";
-                return false;
-            }
-            if (type == kChunkJson) {
-                jsonText.assign(reinterpret_cast<const char*>(&bytes[p + 8]), len);
-            } else if (type == kChunkBin && bin.empty()) {
-                bin.assign(bytes.begin() + p + 8, bytes.begin() + p + 8 + len);
-            }
-            p += 8 + len;
-        }
-    } else {
-        jsonText.assign(bytes.begin(), bytes.end());
-    }
-    doc.gltf = json::parse(jsonText, nullptr, false);
-    if (doc.gltf.is_discarded() || !doc.gltf.is_object()) {
-        error = "invalid glTF JSON";
-        return false;
-    }
     for (const json& b : doc.gltf.value("buffers", json::array())) {
         if (!b.contains("uri")) {
-            doc.buffers.push_back(bin);
+            doc.buffers.push_back(doc.file.bin);
             continue;
         }
         const std::string uri = b["uri"].get<std::string>();
@@ -148,7 +105,7 @@ bool load(const std::string& path, Document& doc, std::string& error)
             return false;
         }
         std::vector<uint8_t> data;
-        if (!ts::readFileBytes(u8str(doc.dir / u8path(uri)), data, error)) {
+        if (!readFileBytes(u8str(doc.dir / u8path(uri)), data, error)) {
             return false;
         }
         doc.buffers.push_back(std::move(data));
@@ -264,7 +221,7 @@ bool encodePrimitive(const Document& doc, const json& prim, const DracoOptions& 
         indices.resize(bytes.size() / elemSize);
         for (size_t i = 0; i < indices.size(); ++i) {
             const uint8_t* p = &bytes[i * elemSize];
-            indices[i] = elemSize == 1 ? *p : elemSize == 2 ? uint32_t(p[0] | (p[1] << 8)) : readU32(p);
+            indices[i] = elemSize == 1 ? *p : elemSize == 2 ? uint32_t(p[0] | (p[1] << 8)) : uint32_t(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
         }
     } else {
         indices.resize(numPoints);
@@ -488,37 +445,19 @@ bool dracoCompressGltf(const std::string& path, const DracoOptions& options, std
     align();
     g["bufferViews"] = newViews;
 
-    std::string binUri;
-    if (!doc.glb) {
-        const json& buffers = g["buffers"];
-        binUri = !buffers.empty() && buffers[0].contains("uri") ? buffers[0]["uri"].get<std::string>()
-                                                                 : u8str(u8path(path).stem()) + ".bin";
-    }
     json buffer = {{"byteLength", bin.size()}};
-    if (!doc.glb) {
+    if (!doc.file.glb) {
+        const json& buffers = g["buffers"];
+        const std::string binUri = !buffers.empty() && buffers[0].contains("uri") ? buffers[0]["uri"].get<std::string>()
+                                                                                   : u8str(u8path(path).stem()) + ".bin";
         buffer["uri"] = binUri;
+        if (!writeFileBytes(u8str(doc.dir / u8path(binUri)), bin, error)) {
+            return false;
+        }
     }
     g["buffers"] = json::array({buffer});
-
-    std::string text = g.dump();
-    if (!doc.glb) {
-        return ts::writeFileBytes(u8str(doc.dir / u8path(binUri)), bin, error) &&
-               ts::writeFileBytes(path, std::vector<uint8_t>(text.begin(), text.end()), error);
-    }
-    while (text.size() % 4) {
-        text.push_back(' ');
-    }
-    std::vector<uint8_t> out;
-    appendU32(out, kGlbMagic);
-    appendU32(out, 2);
-    appendU32(out, uint32_t(12 + 8 + text.size() + 8 + bin.size()));
-    appendU32(out, uint32_t(text.size()));
-    appendU32(out, kChunkJson);
-    out.insert(out.end(), text.begin(), text.end());
-    appendU32(out, uint32_t(bin.size()));
-    appendU32(out, kChunkBin);
-    out.insert(out.end(), bin.begin(), bin.end());
-    return ts::writeFileBytes(path, out, error);
+    doc.file.bin = std::move(bin);
+    return writeGltfFile(path, doc.file, error);
 }
 
 } // namespace model

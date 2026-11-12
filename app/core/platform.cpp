@@ -98,6 +98,64 @@ fs::path findAsset(const std::string& name)
     return {};
 }
 
+fs::path findLibrary(const std::string& stem)
+{
+#if defined(_WIN32)
+    return findAsset(stem + ".dll");
+#elif defined(__APPLE__)
+    return findAsset("lib" + stem + ".dylib");
+#else
+    return findAsset("lib" + stem + ".so");
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Files
+// ---------------------------------------------------------------------------
+
+bool readFileBytes(const std::string& path, std::vector<uint8_t>& out, std::string& error)
+{
+    std::ifstream f(u8path(path), std::ios::binary);
+    if (!f) {
+        error = "cannot open " + path;
+        return false;
+    }
+    f.seekg(0, std::ios::end);
+    const std::streamoff size = f.tellg();
+    f.seekg(0, std::ios::beg);
+    out.resize(size_t(std::max<std::streamoff>(size, 0)));
+    if (size > 0 && !f.read(reinterpret_cast<char*>(out.data()), size)) {
+        error = "cannot read " + path;
+        return false;
+    }
+    return true;
+}
+
+bool writeFileBytes(const std::string& path, const std::vector<uint8_t>& data, std::string& error)
+{
+    std::error_code ec;
+    const fs::path p = u8path(path);
+    if (p.has_parent_path()) {
+        fs::create_directories(p.parent_path(), ec);
+    }
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    if (!f || !f.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()))) {
+        error = "cannot write " + path;
+        return false;
+    }
+    return true;
+}
+
+std::vector<std::string> readLines(const fs::path& path)
+{
+    std::vector<std::string> lines;
+    std::ifstream file(path);
+    for (std::string line; std::getline(file, line);) {
+        lines.push_back(line);
+    }
+    return lines;
+}
+
 // ---------------------------------------------------------------------------
 // Dynamic libraries
 // ---------------------------------------------------------------------------
@@ -184,16 +242,6 @@ std::vector<std::string> platformSystemInfo()
 }
 
 #else
-
-static std::vector<std::string> readLines(const fs::path& path)
-{
-    std::vector<std::string> lines;
-    std::ifstream file(path);
-    for (std::string line; std::getline(file, line);) {
-        lines.push_back(line);
-    }
-    return lines;
-}
 
 std::vector<std::string> platformSystemInfo()
 {
