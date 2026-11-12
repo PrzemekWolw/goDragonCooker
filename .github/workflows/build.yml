@@ -101,7 +101,8 @@ jobs:
                       libtiff-dev libopenexr-dev \
                       libx11-dev libxcursor-dev libxrandr-dev \
                       libxinerama-dev libxi-dev libglx-dev \
-                      libgl1-mesa-dev libxxf86vm-dev
+                      libgl1-mesa-dev libxxf86vm-dev \
+                      libwayland-dev libxkbcommon-dev
 
             - name: Install macOS dependencies
               if: runner.os == 'macOS'

@@ -199,6 +199,9 @@ int main()
     const char* glslVersion = "#version 130";
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+    glfwWindowHintString(GLFW_WAYLAND_APP_ID, "goDragonCooker");
+    glfwWindowHintString(GLFW_X11_CLASS_NAME, "goDragonCooker");
+    glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "goDragonCooker");
 #endif
 
     const std::string title = std::string("CK Asset Tools v") + APP_VERSION;
@@ -213,8 +216,11 @@ int main()
     setTitleBarColor(window);
 
     uiScale = 1.0f;
+    // macOS and Wayland scale through the framebuffer, which ImGui applies itself.
 #if !defined(__APPLE__)
-    glfwGetWindowContentScale(window, &uiScale, nullptr);
+    if (glfwGetPlatform() != GLFW_PLATFORM_WAYLAND) {
+        glfwGetWindowContentScale(window, &uiScale, nullptr);
+    }
 #endif
     if (uiScale < 1.0f) {
         uiScale = 1.0f;

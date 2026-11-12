@@ -29,11 +29,11 @@ git submodule update --init --recursive
 - nasm (Texconv JPEG support builds libjpeg-turbo with its SIMD extensions)
 - Network access for first-time dependency and Linux Vulkan SDK downloads
 - UPX, optionally
-- Linux X11 and OpenGL development packages, used by GLFW
+- Linux X11, Wayland, xkbcommon and OpenGL development packages, used by GLFW
 
 Windows ARM64 and macOS ARM64 are ordinary CMake targets. There is no separate
 GUI toolkit to build per architecture. Linux ARM64 is built natively in CI; a
-cross build also needs the aarch64 X11 and OpenGL libraries GLFW links.
+cross build also needs the aarch64 X11, Wayland and OpenGL libraries GLFW links.
 
 Windows and macOS Vulkan native builds require a Vulkan SDK with `VULKAN_SDK`
 set. Windows also needs SPIR-V-capable DXC in `VULKAN_SDK/bin` or
@@ -200,21 +200,26 @@ Linux builds require:
 - `curl` if the automatic Vulkan SDK download needs its fallback downloader
 - `x86_64` MinGW-w64 cross-compilers when building Windows x64 targets
 - For Linux ARM64, either a native ARM64 host (used by CI) or
-  `aarch64-linux-gnu-gcc/g++` plus the aarch64 OpenGL and X11 libraries GLFW links
-- The X11 and OpenGL development packages required by GLFW
+  `aarch64-linux-gnu-gcc/g++` plus the aarch64 OpenGL, X11 and Wayland libraries GLFW links
+- The X11, Wayland, xkbcommon and OpenGL development packages required by GLFW.
+  GLFW builds both backends and picks Wayland at runtime when the session is
+  Wayland, X11 otherwise. The window system libraries are loaded at runtime, so
+  the binary also starts on systems without Wayland.
 
 Debian or Ubuntu:
 
 ```bash
 sudo apt install gcc g++ libx11-dev libxcursor-dev libxrandr-dev \
-    libxinerama-dev libxi-dev libglx-dev libgl1-mesa-dev libxxf86vm-dev
+    libxinerama-dev libxi-dev libglx-dev libgl1-mesa-dev libxxf86vm-dev \
+    libwayland-dev libxkbcommon-dev
 ```
 
 Fedora:
 
 ```bash
 sudo dnf install gcc gcc-c++ libX11-devel libXcursor-devel libXrandr-devel \
-    libXinerama-devel libXi-devel libGL-devel libXxf86vm-devel
+    libXinerama-devel libXi-devel libGL-devel libXxf86vm-devel \
+    wayland-devel libxkbcommon-devel
 ```
 
 To package Windows releases on Linux, first place Windows Texconv and Vulkan
