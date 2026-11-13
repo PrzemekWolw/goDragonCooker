@@ -37,6 +37,7 @@ struct CookTab {
     std::string directory;
     bool autoDetectFmt = false;
     bool fixNormalSpace = true;
+    bool overwrite = false;
     CookValidation validation;
 };
 
@@ -100,7 +101,8 @@ std::string correctNormalSpace(CookJob& job)
     return format(tr("gdc.cook.normalColorSpace"), name.c_str(), stored, neutral);
 }
 
-void runCooker(std::string directory, bool autoDetectFmt, bool fixNormalSpace, CookValidation validation)
+void runCooker(std::string directory, bool autoDetectFmt, bool fixNormalSpace, bool overwrite,
+               CookValidation validation)
 {
     TaskState& tab = cookTab.task;
     std::string backend;
@@ -115,6 +117,7 @@ void runCooker(std::string directory, bool autoDetectFmt, bool fixNormalSpace, C
     tab.log(tr("gdc.cook.seekingFiles"));
 
     std::vector<CookJob> jobs;
+    size_t skipped = 0;
     struct TempCleanup {
         const std::vector<CookJob>& jobs;
         ~TempCleanup()
@@ -158,7 +161,8 @@ void runCooker(std::string directory, bool autoDetectFmt, bool fixNormalSpace, C
         }
 
         fs::path dds = path;
-        if (fs::exists(dds.replace_extension(".dds"), ec)) {
+        if (!overwrite && fs::exists(dds.replace_extension(".dds"), ec)) {
+            ++skipped;
             continue;
         }
 
@@ -179,6 +183,9 @@ void runCooker(std::string directory, bool autoDetectFmt, bool fixNormalSpace, C
         return;
     }
 
+    if (skipped) {
+        tab.log(format(tr("gdc.cook.skipDdsAlreadyExist"), skipped));
+    }
     const size_t total = jobs.size();
     if (total == 0) {
         tab.log(tr("gdc.cook.noFilesToCook"));
@@ -442,6 +449,7 @@ void cookTabInit()
             cookTab.directory = s.value("directory", cookTab.directory);
             cookTab.autoDetectFmt = s.value("assumeGrayscale", cookTab.autoDetectFmt);
             cookTab.fixNormalSpace = s.value("fixNormalColorSpace", cookTab.fixNormalSpace);
+            cookTab.overwrite = s.value("overwrite", cookTab.overwrite);
             v.validate = s.value("validate", v.validate);
             v.retry = s.value("retry", v.retry);
             v.thresholds.bc7 = s.value("targetBC7", v.thresholds.bc7);
@@ -453,6 +461,7 @@ void cookTabInit()
             j["cook"] = {{"directory", cookTab.directory},
                          {"assumeGrayscale", cookTab.autoDetectFmt},
                          {"fixNormalColorSpace", cookTab.fixNormalSpace},
+                         {"overwrite", cookTab.overwrite},
                          {"validate", v.validate},
                          {"retry", v.retry},
                          {"targetBC7", v.thresholds.bc7},
@@ -505,6 +514,8 @@ void cookTabUI()
     tooltip("gdc.cook.assumeDataTexturesAreGrayscale.tooltip");
     dirty |= ImGui::Checkbox(trId("gdc.cook.fixNormalColorSpace", "cook_normal_space").c_str(), &c.fixNormalSpace);
     tooltip("gdc.cook.fixNormalColorSpace.tooltip");
+    dirty |= ImGui::Checkbox(trId("gdc.cook.overwriteExistingDds", "cook_overwrite").c_str(), &c.overwrite);
+    tooltip("gdc.cook.overwriteExistingDds.tooltip");
     if (dirty) {
         saveSettings();
     }
@@ -516,7 +527,8 @@ void cookTabUI()
                    iconLabel(ICON_STOP, "gdc.cook.stopCooker", "cook_run"), logLines) &&
         !c.directory.empty()) {
         startTask(c.task, tr("gdc.cook.seekingFiles"),
-                  [dir = c.directory, fmt = c.autoDetectFmt, fix = c.fixNormalSpace, v = c.validation] { runCooker(dir, fmt, fix, v); });
+                  [dir = c.directory, fmt = c.autoDetectFmt, fix = c.fixNormalSpace, overwrite = c.overwrite,
+                   v = c.validation] { runCooker(dir, fmt, fix, overwrite, v); });
     }
 
     ImGui::Separator();
